@@ -35,7 +35,12 @@ async fn open_migrated_app_db(db_path: &Path) -> crate::Result<Pool<Sqlite>> {
         );
     }
 
-    sqlx::migrate!().run(&pool).await?;
+    // Experimental builds can apply a migration that is later removed from
+    // the source tree. Keep those profiles bootable; the schema change itself
+    // is already present in the database.
+    let mut migrations = sqlx::migrate!();
+    migrations.set_ignore_missing(true);
+    migrations.run(&pool).await?;
     record_current_app_version(&pool).await?;
 
     if let Err(err) = stale_data_cleanup(&pool).await {
