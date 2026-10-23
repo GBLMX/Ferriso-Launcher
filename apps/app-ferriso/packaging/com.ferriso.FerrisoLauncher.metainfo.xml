@@ -9,7 +9,7 @@
   <launchable type="desktop-id">com.ferriso.FerrisoLauncher.desktop</launchable>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
-  <url type="homepage">https://github.com/GBLMX/code</url>
-  <url type="bugtracker">https://github.com/GBLMX/code/issues</url>
+  <url type="homepage">https://github.com/GBLMX/Ferriso-Launcher</url>
+  <url type="bugtracker">https://github.com/GBLMX/Ferriso-Launcher/issues</url>
   <content_rating type="oars-1.1"/>
 </component>

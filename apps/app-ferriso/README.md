@@ -27,6 +27,19 @@ cargo clippy -p ferriso-launcher --all-targets -- -D warnings
 Window and layered configuration live in `$FERRISO_LAUNCHER_CONFIG` or the
 platform config directory (`config.toml`).
 
+## Updates
+
+The native app checks `ferriso-updates.json` at startup and every five minutes.
+It uses the static mirror at `https://updates.bionickernel.com/ferriso-updates.json`
+and falls back to the latest GitHub release asset when the mirror is
+unreachable. Set `FERRISO_UPDATE_URL` to test another manifest without a
+rebuild.
+
+The mirror is populated from the latest `ferriso-v*` GitHub release by
+`apps/app-ferriso/packaging/sync-updates.sh`; the host runs it from cron. The
+script downloads assets, rewrites their URLs, and replaces the manifest
+atomically so clients never see a partial release.
+
 ## Accessibility
 
 The iced frontend exposes an AccessKit tree: navigation, page status, refresh,

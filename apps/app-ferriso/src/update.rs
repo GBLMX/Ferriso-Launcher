@@ -17,9 +17,11 @@ pub const VERSION: &str = match option_env!("FERRISO_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
-/// Public manifest for `ferriso-v*` GitHub releases. It is deliberately
-/// separate from Modrinth's `updates.json`, which belongs to the Tauri app.
-pub const DEFAULT_MANIFEST_URL: &str = "https://github.com/GBLMX/code/releases/latest/download/ferriso-updates.json";
+/// Public manifest for `ferriso-v*` releases. The Aliyun host is a static
+/// mirror; GitHub remains a fallback if the mirror is unavailable.
+pub const DEFAULT_MANIFEST_URL: &str =
+    "https://updates.bionickernel.com/ferriso-updates.json";
+pub const FALLBACK_MANIFEST_URL: &str = "https://github.com/GBLMX/Ferriso-Launcher/releases/latest/download/ferriso-updates.json";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
@@ -69,31 +71,51 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 /// Fetch and parse the native manifest. Network errors are returned so the
 /// caller can log them; the UI stays quiet rather than showing a startup error.
 pub async fn check() -> Result<Option<UpdateInfo>, String> {
-    let url = std::env::var("FERRISO_UPDATE_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_MANIFEST_URL.to_string());
+    if let Ok(url) = std::env::var("FERRISO_UPDATE_URL")
+        && !url.trim().is_empty()
+    {
+        let manifest = fetch_manifest(url.trim()).await?;
+        return Ok(update_from_manifest(manifest, VERSION, &platform_key()));
+    }
 
+    let mut errors = Vec::new();
+    for url in [DEFAULT_MANIFEST_URL, FALLBACK_MANIFEST_URL] {
+        match fetch_manifest(url).await {
+            Ok(manifest) => {
+                return Ok(update_from_manifest(
+                    manifest,
+                    VERSION,
+                    &platform_key(),
+                ));
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    Err(errors.join("; "))
+}
+
+async fn fetch_manifest(url: &str) -> Result<Manifest, String> {
     let client = reqwest::Client::builder()
         .user_agent(format!("FerrisoLauncher/{VERSION}"))
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(describe)?;
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|error| format!("update check failed: {error}"))?;
+    let response =
+        client.get(url).send().await.map_err(|error| {
+            format!("update check failed for {url}: {error}")
+        })?;
     if !response.status().is_success() {
-        return Err(format!("update check failed: HTTP {}", response.status()));
+        return Err(format!(
+            "update check failed for {url}: HTTP {}",
+            response.status()
+        ));
     }
     let body = response
         .text()
         .await
         .map_err(|error| format!("update manifest read failed: {error}"))?;
-    let manifest = serde_json::from_str::<Manifest>(&body)
-        .map_err(|error| format!("update manifest is invalid: {error}"))?;
-    Ok(update_from_manifest(manifest, VERSION, &platform_key()))
+    serde_json::from_str::<Manifest>(&body)
+        .map_err(|error| format!("update manifest is invalid: {error}"))
 }
 
 fn update_from_manifest(
