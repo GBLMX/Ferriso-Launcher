@@ -14,7 +14,7 @@ use std::{
 };
 
 use crate::skin3d;
-use crate::update::{self, UpdateInfo, VERSION};
+use crate::update::{self, Channel, UpdateInfo, VERSION};
 use base64::Engine as _;
 use bytes::Bytes;
 use either::Either;
@@ -1433,6 +1433,7 @@ pub struct FerrisoApp {
     skin_preview_pending: bool,
     update: Option<UpdateInfo>,
     dismissed_update: Option<String>,
+    update_channel: Channel,
     skin_yaw: f32,
     skin_pitch: f32,
     skin_dragging: bool,
@@ -1500,6 +1501,7 @@ impl FerrisoApp {
             skin_preview_pending: false,
             update: None,
             dismissed_update: None,
+            update_channel: Channel::Stable,
             skin_yaw: 0.5,
             skin_pitch: 0.12,
             skin_dragging: false,
@@ -1537,6 +1539,12 @@ impl FerrisoApp {
         let mut app = Self::new();
         app.page = page;
         app
+    }
+
+    #[must_use]
+    pub fn with_update_channel(mut self, channel: Channel) -> Self {
+        self.update_channel = channel;
+        self
     }
 
     pub fn with_browse_query(query: impl Into<String>) -> Self {
@@ -1938,7 +1946,7 @@ impl App for FerrisoApp {
                     commands.push(self.load_hosting());
                 }
                 commands.push(Command::perform(
-                    update::check(),
+                    update::check(self.update_channel),
                     Message::UpdateChecked,
                 ));
                 if self.page == Page::Project
@@ -4586,7 +4594,10 @@ impl App for FerrisoApp {
                 if self.update.is_some() {
                     return Command::none();
                 }
-                Command::perform(update::check(), Message::UpdateChecked)
+                Command::perform(
+                    update::check(self.update_channel),
+                    Message::UpdateChecked,
+                )
             }
             Message::UpdateChecked(result) => {
                 match result {

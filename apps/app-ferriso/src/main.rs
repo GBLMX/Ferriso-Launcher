@@ -67,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         FerrisoApp::with_page(page)
     };
+    let app = app.with_update_channel(config.update.channel);
 
     ferriso_gui::run(
         app,

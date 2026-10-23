@@ -234,4 +234,10 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create -R "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" dist/* --title "Ferriso Launcher $GITHUB_REF_NAME" --generate-notes
+        run: |
+          prerelease=()
+          version="${GITHUB_REF_NAME#ferriso-v}"
+          if [[ "$version" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create -R "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "${prerelease[@]}" dist/* --title "Ferriso Launcher $GITHUB_REF_NAME" --generate-notes

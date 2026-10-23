@@ -27,18 +27,30 @@ cargo clippy -p ferriso-launcher --all-targets -- -D warnings
 Window and layered configuration live in `$FERRISO_LAUNCHER_CONFIG` or the
 platform config directory (`config.toml`).
 
+```toml
+[update]
+channel = "stable" # stable, beta, or alpha
+```
+
+The environment equivalent is `FERRISO_LAUNCHER__UPDATE__CHANNEL`. Beta
+clients accept stable and beta releases; alpha clients also accept alpha
+releases. Tag pre-releases as `ferriso-v0.2.0-beta.1` or
+`ferriso-v0.2.0-alpha.1`; the workflow marks them as GitHub pre-releases so
+stable clients never select them.
+
 ## Updates
 
-The native app checks `ferriso-updates.json` at startup and every five minutes.
-It uses the static mirror at `https://updates.bionickernel.com/ferriso-updates.json`
-and falls back to the latest GitHub release asset when the mirror is
-unreachable. Set `FERRISO_UPDATE_URL` to test another manifest without a
-rebuild.
+The native app checks its channel manifest at startup and every five minutes.
+Stable uses `https://updates.bionickernel.com/ferriso-updates.json`; beta and
+alpha append `-beta` and `-alpha` before `.json`. When the mirror is
+unreachable it falls back to the latest stable GitHub release asset. Set
+`FERRISO_UPDATE_URL` to test another manifest without a rebuild.
 
-The mirror is populated from the latest `ferriso-v*` GitHub release by
-`apps/app-ferriso/packaging/sync-updates.sh`; the host runs it from cron. The
-script downloads assets, rewrites their URLs, and replaces the manifest
-atomically so clients never see a partial release.
+The mirror is populated from the latest `ferriso-v*` GitHub releases by
+`apps/app-ferriso/packaging/sync-updates.py`; the host runs it from cron. The
+script selects the newest stable, beta, and alpha releases, downloads their
+assets, rewrites their URLs, and replaces each channel manifest atomically so
+clients never see a partial release.
 
 ## Accessibility
 

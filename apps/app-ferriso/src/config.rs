@@ -6,6 +6,8 @@
 
 use serde::Deserialize;
 
+use crate::update::Channel;
+
 /// App name used by `ferriso-config` for files and environment variables.
 pub const APP: &str = "ferriso-launcher";
 
@@ -14,6 +16,7 @@ pub const APP: &str = "ferriso-launcher";
 #[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     pub gui: GuiConfig,
+    pub update: UpdateConfig,
 }
 
 impl AppConfig {
@@ -61,6 +64,21 @@ impl GuiConfig {
             size: (self.width, self.height),
             exit_on_close_request: true,
             application_id: self.application_id.clone(),
+        }
+    }
+}
+
+/// Native update channel selection.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdateConfig {
+    pub channel: Channel,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            channel: Channel::Stable,
         }
     }
 }

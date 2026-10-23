@@ -17,8 +17,36 @@ pub const VERSION: &str = match option_env!("FERRISO_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
-/// Public manifest for `ferriso-v*` releases. The Aliyun host is a static
-/// mirror; GitHub remains a fallback if the mirror is unavailable.
+/// Release channel used for update checks.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Channel {
+    /// Stable releases only.
+    #[default]
+    Stable,
+    /// Stable plus beta releases.
+    Beta,
+    /// Stable, beta, and alpha releases.
+    Alpha,
+}
+
+impl Channel {
+    /// Static manifest for this channel.
+    const fn manifest_url(self) -> &'static str {
+        match self {
+            Self::Stable => DEFAULT_MANIFEST_URL,
+            Self::Beta => {
+                "https://updates.bionickernel.com/ferriso-updates-beta.json"
+            }
+            Self::Alpha => {
+                "https://updates.bionickernel.com/ferriso-updates-alpha.json"
+            }
+        }
+    }
+}
+
+/// Public manifest for stable `ferriso-v*` releases. The Aliyun host is a
+/// static mirror; GitHub remains a fallback if the mirror is unavailable.
 pub const DEFAULT_MANIFEST_URL: &str =
     "https://updates.bionickernel.com/ferriso-updates.json";
 pub const FALLBACK_MANIFEST_URL: &str = "https://github.com/GBLMX/Ferriso-Launcher/releases/latest/download/ferriso-updates.json";
@@ -68,9 +96,10 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
     candidate > current
 }
 
-/// Fetch and parse the native manifest. Network errors are returned so the
-/// caller can log them; the UI stays quiet rather than showing a startup error.
-pub async fn check() -> Result<Option<UpdateInfo>, String> {
+/// Fetch and parse the native manifest for `channel`. Network errors are
+/// returned so the caller can log them; the UI stays quiet rather than showing
+/// a startup error.
+pub async fn check(channel: Channel) -> Result<Option<UpdateInfo>, String> {
     if let Ok(url) = std::env::var("FERRISO_UPDATE_URL")
         && !url.trim().is_empty()
     {
@@ -78,20 +107,24 @@ pub async fn check() -> Result<Option<UpdateInfo>, String> {
         return Ok(update_from_manifest(manifest, VERSION, &platform_key()));
     }
 
-    let mut errors = Vec::new();
-    for url in [DEFAULT_MANIFEST_URL, FALLBACK_MANIFEST_URL] {
-        match fetch_manifest(url).await {
-            Ok(manifest) => {
-                return Ok(update_from_manifest(
-                    manifest,
-                    VERSION,
-                    &platform_key(),
-                ));
+    let primary = channel.manifest_url();
+    match fetch_manifest(primary).await {
+        Ok(manifest) => {
+            Ok(update_from_manifest(manifest, VERSION, &platform_key()))
+        }
+        Err(primary_error) => {
+            // GitHub only exposes a stable "latest" asset. Stable is also an
+            // acceptable fallback for beta and alpha clients.
+            match fetch_manifest(FALLBACK_MANIFEST_URL).await {
+                Ok(manifest) => {
+                    Ok(update_from_manifest(manifest, VERSION, &platform_key()))
+                }
+                Err(fallback_error) => {
+                    Err(format!("{primary_error}; {fallback_error}"))
+                }
             }
-            Err(error) => errors.push(error),
         }
     }
-    Err(errors.join("; "))
 }
 
 async fn fetch_manifest(url: &str) -> Result<Manifest, String> {
@@ -175,6 +208,26 @@ mod tests {
         assert!(is_newer("v1.0.0", "0.9.9"));
         assert!(!is_newer("0.1.0", "0.1.0"));
         assert!(!is_newer("garbage", "0.1.0"));
+    }
+
+    #[test]
+    fn prereleases_follow_semver_order() {
+        assert!(is_newer("0.2.0-alpha.1", "0.1.0"));
+        assert!(is_newer("0.2.0-beta.1", "0.2.0-alpha.2"));
+        assert!(is_newer("0.2.0", "0.2.0-beta.1"));
+        assert!(!is_newer("0.2.0-alpha.1", "0.2.0-beta.1"));
+    }
+
+    #[test]
+    fn channels_use_distinct_manifests() {
+        assert_eq!(Channel::default(), Channel::Stable);
+        assert_eq!(Channel::Stable.manifest_url(), DEFAULT_MANIFEST_URL);
+        assert!(Channel::Beta.manifest_url().ends_with("-beta.json"));
+        assert!(Channel::Alpha.manifest_url().ends_with("-alpha.json"));
+        assert_eq!(
+            serde_json::from_str::<Channel>(r#""beta""#).unwrap(),
+            Channel::Beta
+        );
     }
 
     #[test]
