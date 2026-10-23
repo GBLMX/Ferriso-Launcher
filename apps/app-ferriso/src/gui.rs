@@ -24,11 +24,12 @@ use theseus::hosting::HostingPowerAction;
 use theseus::instance::{FAVORITES_GROUP_ID, InstanceGroup};
 
 use crate::app::{
-    ContentRow, CrashCause, DetailTab, DetailView, GroupForm, HostedServerView,
-    HostingRename, InstanceEditForm, InstanceView, JobView, JreChoice,
-    LibraryForm, LibrarySort, LogView, Message, Page, ProcessExitView,
-    ProcessView, ProjectKind, ProjectView, SettingChange, SkinTab,
-    VersionPicker, ViewModel, WorldArt, WorldForm, WorldFormKind, WorldRow,
+    BrowseSort, ContentRow, CrashCause, CreateStage, DetailTab, DetailView,
+    GroupForm, HostedServerView, HostingRename, InstanceEditForm, InstanceView,
+    JobView, JreChoice, LibraryForm, LibrarySort, LogView, Message, Page,
+    ProcessExitView, ProcessView, ProjectKind, ProjectView, SettingChange,
+    SkinTab, VersionPicker, ViewModel, WorldArt, WorldForm, WorldFormKind,
+    WorldRow,
 };
 use crate::i18n::{self, t};
 
@@ -530,6 +531,7 @@ fn error_hover() -> Color {
 
 const LOADER_LABELS: [&str; 5] =
     ["Vanilla", "Fabric", "Forge", "NeoForge", "Quilt"];
+const CREATE_NAME_INPUT: &str = "ferriso-create-name";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Shortcut {
@@ -547,6 +549,7 @@ pub struct FerrisoGui {
     keymap: Keymap<Shortcut>,
     title: String,
     system_theme_probed: bool,
+    create_focused: bool,
 }
 
 impl FerrisoGui {
@@ -580,6 +583,7 @@ impl FerrisoGui {
             keymap,
             title,
             system_theme_probed: false,
+            create_focused: false,
         }
     }
 }
@@ -622,7 +626,25 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
                 text_color: Some(fg()),
                 ..Default::default()
             });
-        if let Some(exit) = &view.exit {
+        if view.create.open && view.exit.is_none() {
+            let backdrop = mouse_area(
+                container(Space::new())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(modal_backdrop_style),
+            )
+            .on_press(Msg::User(Message::ToggleCreate));
+            let dialog = container(create_modal(view))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .padding(40);
+            Stack::with_children([shell.into(), backdrop.into(), dialog.into()])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else if let Some(exit) = &view.exit {
             let dialog = container(exit_dialog(exit))
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -641,27 +663,44 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
 
     fn subscription(&self, view: &ViewModel) -> iced::Subscription<Msg> {
         let exit_open = view.exit.is_some();
+        let create_open = view.create.open && !exit_open;
         let keys = keyboard::listen()
             .with(self.keymap.clone())
-            .with(exit_open)
-            .filter_map(|(exit_open, (keymap, event))| {
+            .with((exit_open, create_open))
+            .filter_map(|((exit_open, create_open), (keymap, event))| {
                 let keyboard::Event::KeyPressed { key, modifiers, .. } = event
                 else {
                     return None;
                 };
-                if exit_open
-                    && matches!(
-                        &key,
-                        keyboard::Key::Named(keyboard::key::Named::Escape)
-                    )
-                {
-                    return Some(Msg::User(Message::DismissExit));
+                if matches!(
+                    &key,
+                    keyboard::Key::Named(keyboard::key::Named::Escape)
+                ) {
+                    return if exit_open {
+                        Some(Msg::User(Message::DismissExit))
+                    } else if create_open {
+                        Some(Msg::User(Message::ToggleCreate))
+                    } else {
+                        None
+                    };
+                }
+                if exit_open || create_open {
+                    return None;
                 }
                 if modifiers.contains(keyboard::Modifiers::CTRL)
                     && let keyboard::Key::Character(character) = &key
-                    && character.as_str() == "7"
                 {
-                    return Some(Msg::User(Message::Navigate(Page::Hosting)));
+                    match character.as_str() {
+                        "7" => {
+                            return Some(Msg::User(Message::Navigate(
+                                Page::Hosting,
+                            )));
+                        }
+                        "n" | "N" => {
+                            return Some(Msg::User(Message::OpenCreate));
+                        }
+                        _ => {}
+                    }
                 }
                 let chord = ferriso_gui::keymap::chord(&key, modifiers)?;
                 match keymap.resolve(&chord).copied()? {
@@ -738,16 +777,29 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
         }
     }
 
-    fn on_snapshot_task(&mut self, _view: &ViewModel) -> iced::Task<Msg> {
-        if self.system_theme_probed {
-            return iced::Task::none();
+    fn on_snapshot_task(&mut self, view: &ViewModel) -> iced::Task<Msg> {
+        let mut tasks: Vec<iced::Task<Msg>> = Vec::new();
+        if !self.system_theme_probed {
+            self.system_theme_probed = true;
+            tasks.push(iced::system::theme().map(|mode| {
+                Msg::User(Message::SystemThemeChanged(
+                    mode == iced::theme::Mode::Light,
+                ))
+            }));
         }
-        self.system_theme_probed = true;
-        iced::system::theme().map(|mode| {
-            Msg::User(Message::SystemThemeChanged(
-                mode == iced::theme::Mode::Light,
-            ))
-        })
+
+        let custom =
+            view.create.open && view.create.stage == CreateStage::Custom;
+        if custom && !self.create_focused {
+            self.create_focused = true;
+            tasks.push(iced::widget::operation::focus::<Msg>(
+                iced::widget::Id::new(CREATE_NAME_INPUT),
+            ));
+        } else if !custom {
+            self.create_focused = false;
+        }
+
+        iced::Task::batch(tasks)
     }
 
     fn theme(&self, view: &ViewModel) -> Theme {
@@ -876,7 +928,7 @@ fn sidebar(view: &ViewModel) -> Element<'_, Msg> {
             ]
             .spacing(9)
             .align_y(Alignment::Center),
-            text(t("Ctrl+1…7 · Ctrl+R · Ctrl+Q"))
+            text(t("Ctrl+N · Ctrl+1…7 · Ctrl+R · Ctrl+Q"))
                 .size(9)
                 .color(muted_c()),
             text(t("Unofficial Modrinth fork"))
@@ -1405,9 +1457,6 @@ fn home(view: &ViewModel) -> Element<'_, Msg> {
         );
     }
 
-    if view.create.open {
-        body = body.push(create_card(view));
-    }
     if let Some(form @ LibraryForm::Import { .. }) = &view.library_form {
         body = body.push(import_card(form));
     }
@@ -1573,9 +1622,6 @@ fn library(view: &ViewModel) -> Element<'_, Msg> {
     .align_y(Alignment::Center);
 
     let mut body = column![header, controls].spacing(10);
-    if view.create.open {
-        body = body.push(create_card(view));
-    }
     if let Some(form @ LibraryForm::Import { .. }) = &view.library_form {
         body = body.push(import_card(form));
     }
@@ -1937,7 +1983,99 @@ fn instance_row<'a>(
     .into()
 }
 
-fn create_card(view: &ViewModel) -> Element<'_, Msg> {
+fn create_modal(view: &ViewModel) -> Element<'_, Msg> {
+    let body = match view.create.stage {
+        CreateStage::Choose => create_choose_stage(),
+        CreateStage::Custom => create_custom_stage(view),
+    };
+    container(body)
+        .width(Length::Fixed(700.0))
+        .max_height(600.0)
+        .padding(20)
+        .style(card_style)
+        .into()
+}
+
+fn create_header(
+    title: &'static str,
+    show_back: bool,
+) -> Element<'static, Msg> {
+    let back: Element<'static, Msg> = if show_back {
+        button(text(t("← Back")).size(10).color(muted_c()))
+            .padding([5, 9])
+            .on_press(Msg::User(Message::CreateStep(CreateStage::Choose)))
+            .style(ghost_style)
+            .into()
+    } else {
+        Space::new().width(0).into()
+    };
+    row![
+        back,
+        column![
+            text(t("NEW INSTANCE")).size(9).color(accent_c()),
+            text(t(title)).size(21).color(fg()),
+        ]
+        .spacing(2),
+        Space::new().width(Length::Fill),
+        button(text(t("Close")).size(11).color(muted_c()))
+            .padding([5, 9])
+            .on_press(Msg::User(Message::ToggleCreate))
+            .style(ghost_style),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn create_choose_stage() -> Element<'static, Msg> {
+    column![
+        create_header("Create an instance", false),
+        text(t("Choose how you want to start.")).size(12).color(muted_c()),
+        row![
+            create_option(
+                "Custom setup",
+                "Name it, pick a Minecraft version, and choose a loader.",
+                Message::CreateStep(CreateStage::Custom),
+            ),
+            create_option(
+                "Import instance",
+                "Import from Prism, MultiMC, ATLauncher, GDLauncher, or CurseForge.",
+                Message::BeginImport,
+            ),
+            create_option(
+                "Browse modpacks",
+                "Install a Modrinth modpack and create its instance.",
+                Message::Navigate(Page::Browse),
+            ),
+        ]
+        .spacing(10)
+        .width(Length::Fill),
+    ]
+    .spacing(14)
+    .into()
+}
+
+fn create_option(
+    title: &'static str,
+    detail: &'static str,
+    action: Message,
+) -> Element<'static, Msg> {
+    button(
+        column![
+            text(t(title)).size(14).color(fg()),
+            text(t(detail)).size(10).color(muted_c()),
+        ]
+        .spacing(5),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(104.0))
+    .padding(14)
+    .on_press(Msg::User(action))
+    .style(row_style(false))
+    .into()
+}
+
+fn create_custom_stage(view: &ViewModel) -> Element<'_, Msg> {
     let mut loaders = row![].spacing(6);
     for (index, label) in LOADER_LABELS.iter().enumerate() {
         loaders = loaders.push(
@@ -1966,28 +2104,16 @@ fn create_card(view: &ViewModel) -> Element<'_, Msg> {
     };
 
     let mut form = column![
-        row![
-            text(t("New instance")).size(18).color(fg()),
-            Space::new().width(Length::Fill),
-            button(text(t("Close")).size(11).color(muted_c()))
-                .padding([5, 9])
-                .on_press(Msg::User(Message::ToggleCreate))
-                .style(ghost_style),
-        ]
-        .align_y(Alignment::Center),
+        create_header("Custom setup", true),
+        text(t("Instance name")).size(10).color(muted_c()),
         text_input(t("Instance name"), &view.create.name)
+            .id(iced::widget::Id::new(CREATE_NAME_INPUT))
             .padding(8)
             .style(text_input_style)
             .width(Length::Fill)
             .on_input(|value| Msg::User(Message::CreateNameChanged(value))),
-        text_input(
-            t("Minecraft version (e.g. 1.21.10)"),
-            &view.create.game_version
-        )
-        .padding(8)
-        .style(text_input_style)
-        .width(Length::Fill)
-        .on_input(|value| Msg::User(Message::CreateVersionChanged(value))),
+        text(t("Minecraft version")).size(10).color(muted_c()),
+        create_version_picker(view),
         text(
             view.latest_release
                 .as_deref()
@@ -1998,17 +2124,147 @@ fn create_card(view: &ViewModel) -> Element<'_, Msg> {
         )
         .size(10)
         .color(muted_c()),
-        text(t("Loader")).size(11).color(muted_c()),
+        text(t("Loader")).size(10).color(muted_c()),
         loaders,
-        row![create_button].spacing(8).align_y(Alignment::Center),
     ]
     .spacing(8);
+
+    if !view.create.is_vanilla() {
+        form = form
+            .push(text(t("Loader version")).size(10).color(muted_c()))
+            .push(create_loader_version_picker(view));
+    }
+
+    form = form.push(row![create_button].spacing(8).align_y(Alignment::Center));
 
     if let Some(error_c) = &view.create.error {
         form = form.push(text(error_c).size(11).color(danger_c()));
     }
 
-    container(form).padding(16).style(card_style).into()
+    form.into()
+}
+
+fn create_version_picker(view: &ViewModel) -> Element<'_, Msg> {
+    if view.create.game_versions.is_empty() {
+        return text_input(
+            t("Loading Minecraft versions…"),
+            &view.create.game_version,
+        )
+        .padding(8)
+        .style(text_input_style)
+        .width(Length::Fill)
+        .into();
+    }
+
+    let query = view.create.game_version_query.trim().to_lowercase();
+    let versions: Vec<&str> = view
+        .create
+        .game_versions
+        .iter()
+        .filter(|version| {
+            query.is_empty() || version.to_lowercase().contains(&query)
+        })
+        .map(String::as_str)
+        .collect();
+    let search =
+        text_input(t("Search versions…"), &view.create.game_version_query)
+            .size(10)
+            .padding(7)
+            .style(text_input_style)
+            .width(Length::Fill)
+            .on_input(|value| {
+                Msg::User(Message::CreateVersionQueryChanged(value))
+            });
+    let options: Element<'_, Msg> = if versions.is_empty() {
+        text(t("No matching Minecraft versions."))
+            .size(10)
+            .color(warning_c())
+            .into()
+    } else {
+        pick_list(
+            versions,
+            Some(view.create.game_version.as_str()),
+            |version| {
+                Msg::User(Message::CreateVersionSelected(version.to_owned()))
+            },
+        )
+        .menu_height(Length::Fixed(260.0))
+        .text_size(11)
+        .padding([8, 10])
+        .width(Length::Fill)
+        .into()
+    };
+
+    column![search, options].spacing(6).into()
+}
+
+fn create_loader_version_picker(view: &ViewModel) -> Element<'_, Msg> {
+    if view.create.loader_versions_loading {
+        return text(t("Loading loader versions…"))
+            .size(10)
+            .color(muted_c())
+            .into();
+    }
+
+    let mut controls = column![].spacing(4);
+    if let Some(error) = &view.create.loader_versions_error {
+        controls = controls.push(text(error).size(10).color(warning_c()));
+    }
+
+    let query = view.create.loader_version_query.trim().to_lowercase();
+    let mut versions = vec!["Latest"];
+    versions.extend(
+        view.create
+            .loader_versions
+            .iter()
+            .filter(|version| {
+                query.is_empty() || version.to_lowercase().contains(&query)
+            })
+            .map(String::as_str),
+    );
+    let selected = if view.create.loader_version.is_empty() {
+        "Latest"
+    } else {
+        view.create.loader_version.as_str()
+    };
+
+    controls = controls.push(
+        text_input(
+            t("Search loader versions…"),
+            &view.create.loader_version_query,
+        )
+        .size(10)
+        .padding(7)
+        .style(text_input_style)
+        .width(Length::Fill)
+        .on_input(|value| {
+            Msg::User(Message::CreateLoaderVersionQueryChanged(value))
+        }),
+    );
+    if !query.is_empty() && versions.len() == 1 {
+        controls = controls.push(
+            text(t("No matching loader versions."))
+                .size(10)
+                .color(warning_c()),
+        );
+    }
+    controls
+        .push(
+            pick_list(versions, Some(selected), |version| {
+                Msg::User(Message::CreateLoaderVersionSelected(
+                    if version == "Latest" {
+                        String::new()
+                    } else {
+                        version.to_owned()
+                    },
+                ))
+            })
+            .menu_height(Length::Fixed(260.0))
+            .text_size(11)
+            .padding([8, 10])
+            .width(Length::Fill),
+        )
+        .into()
 }
 
 fn browse(view: &ViewModel) -> Element<'_, Msg> {
@@ -2042,6 +2298,19 @@ fn browse(view: &ViewModel) -> Element<'_, Msg> {
             .style(nav_style(view.browse.kind == kind, view.phase)),
         );
     }
+    filters = filters
+        .push(Space::new().width(Length::Fill))
+        .push(text(t("Sort")).size(10).color(muted_c()))
+        .push(
+            pick_list(
+                BrowseSort::ALL.to_vec(),
+                Some(view.browse.sort),
+                |sort| Msg::User(Message::BrowseSortChanged(sort)),
+            )
+            .text_size(10)
+            .padding([5, 8])
+            .width(Length::Fixed(150.0)),
+        );
 
     let mut body = column![
         row![

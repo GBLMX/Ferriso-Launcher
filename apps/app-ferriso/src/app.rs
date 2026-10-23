@@ -5,7 +5,7 @@
 //! owned by the Ferriso actor.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     path::{Component, Path, PathBuf},
     pin::Pin,
@@ -436,6 +436,7 @@ impl ProjectPage {
 pub struct BrowseView {
     pub query: String,
     pub kind: ProjectKind,
+    pub sort: BrowseSort,
     pub results: Vec<ProjectView>,
     pub loading: bool,
     pub loaded: bool,
@@ -447,6 +448,7 @@ impl Default for BrowseView {
         Self {
             query: String::new(),
             kind: ProjectKind::Modpack,
+            sort: BrowseSort::Relevance,
             results: Vec::new(),
             loading: false,
             loaded: false,
@@ -455,12 +457,73 @@ impl Default for BrowseView {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BrowseSort {
+    #[default]
+    Relevance,
+    Downloads,
+    Follows,
+    Newest,
+    Updated,
+}
+
+impl BrowseSort {
+    pub const ALL: [Self; 5] = [
+        Self::Relevance,
+        Self::Downloads,
+        Self::Follows,
+        Self::Newest,
+        Self::Updated,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Relevance => "Relevance",
+            Self::Downloads => "Downloads",
+            Self::Follows => "Followers",
+            Self::Newest => "Newest",
+            Self::Updated => "Recently updated",
+        }
+    }
+
+    fn api_index(self) -> &'static str {
+        match self {
+            Self::Relevance => "relevance",
+            Self::Downloads => "downloads",
+            Self::Follows => "follows",
+            Self::Newest => "newest",
+            Self::Updated => "updated",
+        }
+    }
+}
+
+impl std::fmt::Display for BrowseSort {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CreateStage {
+    #[default]
+    Choose,
+    Custom,
+}
+
 #[derive(Clone, Debug)]
 pub struct CreateView {
     pub open: bool,
+    pub stage: CreateStage,
     pub name: String,
     pub game_version: String,
+    pub game_versions: Vec<String>,
+    pub game_version_query: String,
     pub loader: usize,
+    pub loader_version: String,
+    pub loader_versions: Vec<String>,
+    pub loader_version_query: String,
+    pub loader_versions_loading: bool,
+    pub loader_versions_error: Option<String>,
     pub busy: bool,
     pub error: Option<String>,
 }
@@ -477,15 +540,27 @@ impl CreateView {
     fn loader(&self) -> ModLoader {
         Self::LOADERS[self.loader.min(Self::LOADERS.len() - 1)]
     }
+
+    pub fn is_vanilla(&self) -> bool {
+        self.loader() == ModLoader::Vanilla
+    }
 }
 
 impl Default for CreateView {
     fn default() -> Self {
         Self {
             open: false,
+            stage: CreateStage::Choose,
             name: String::new(),
-            game_version: "1.21.10".into(),
+            game_version: String::new(),
+            game_versions: Vec::new(),
+            game_version_query: String::new(),
             loader: 0,
+            loader_version: String::new(),
+            loader_versions: Vec::new(),
+            loader_version_query: String::new(),
+            loader_versions_loading: false,
+            loader_versions_error: None,
             busy: false,
             error: None,
         }
@@ -1079,6 +1154,7 @@ pub enum Message {
     AccountRemoved(Result<(), String>),
     BrowseQueryChanged(String),
     BrowseKind(ProjectKind),
+    BrowseSortChanged(BrowseSort),
     BrowseSearch,
     BrowseResults(Result<Vec<ProjectView>, String>),
     OpenProject(String),
@@ -1093,9 +1169,15 @@ pub enum Message {
     OpenUrl(String),
     ToggleCreate,
     OpenCreate,
+    CreateStep(CreateStage),
     CreateNameChanged(String),
-    CreateVersionChanged(String),
+    CreateVersionSelected(String),
+    CreateVersionQueryChanged(String),
+    CreateVersionsLoaded(Result<Vec<String>, String>),
     CreateLoaderChanged(usize),
+    CreateLoaderVersionsLoaded(usize, String, Result<Vec<String>, String>),
+    CreateLoaderVersionQueryChanged(String),
+    CreateLoaderVersionSelected(String),
     CreateInstance,
     CreateStarted(Result<InstallJobSnapshot, String>),
     DetailTab(DetailTab),
@@ -1689,6 +1771,31 @@ impl FerrisoApp {
             .collect()
     }
 
+    fn refresh_loader_versions(&mut self) -> Command<Message> {
+        self.create.loader_versions.clear();
+        self.create.loader_version.clear();
+        self.create.loader_version_query.clear();
+        self.create.loader_versions_error = None;
+        let game_version = self.create.game_version.clone();
+        if self.create.is_vanilla() || game_version.trim().is_empty() {
+            self.create.loader_versions_loading = false;
+            return Command::none();
+        }
+        self.create.loader_versions_loading = true;
+        let loader = self.create.loader;
+        let message_version = game_version.clone();
+        Command::perform(
+            load_loader_versions(loader, game_version),
+            move |result| {
+                Message::CreateLoaderVersionsLoaded(
+                    loader,
+                    message_version.clone(),
+                    result,
+                )
+            },
+        )
+    }
+
     fn refresh_shared(&self) -> Command<Message> {
         if self.shared.is_none() {
             return self.reload_after_mutation();
@@ -1761,7 +1868,11 @@ impl FerrisoApp {
         self.browse.loading = true;
         self.browse.error = None;
         Command::perform(
-            search_projects(self.browse.query.clone(), self.browse.kind),
+            search_projects(
+                self.browse.query.clone(),
+                self.browse.kind,
+                self.browse.sort,
+            ),
             Message::BrowseResults,
         )
     }
@@ -1801,6 +1912,10 @@ impl App for FerrisoApp {
                     }
                 }
                 let mut commands = Vec::new();
+                commands.push(Command::perform(
+                    load_game_versions(),
+                    Message::CreateVersionsLoaded,
+                ));
                 if self.accounts.iter().any(|account| account.active) {
                     commands.push(Command::perform(
                         load_account_appearance(),
@@ -1888,6 +2003,7 @@ impl App for FerrisoApp {
                 self.edit = None;
                 self.delete_confirm = false;
                 self.library_form = None;
+                self.create.open = false;
                 self.page = page;
                 let mut commands = Vec::new();
                 if page == Page::Browse
@@ -2128,6 +2244,11 @@ impl App for FerrisoApp {
                 self.browse.loaded = false;
                 self.load_browse()
             }
+            Message::BrowseSortChanged(sort) => {
+                self.browse.sort = sort;
+                self.browse.loaded = false;
+                self.load_browse()
+            }
             Message::BrowseSearch => self.load_browse(),
             Message::BrowseResults(result) => {
                 self.browse.loading = false;
@@ -2309,23 +2430,121 @@ impl App for FerrisoApp {
             }
             Message::ToggleCreate => {
                 self.create.open = !self.create.open;
+                if self.create.open {
+                    self.create.stage = CreateStage::Choose;
+                    self.create.error = None;
+                }
                 Command::none()
             }
             Message::OpenCreate => {
                 self.page = Page::Library;
+                self.create.stage = CreateStage::Choose;
+                self.create.error = None;
                 self.create.open = true;
+                Command::none()
+            }
+            Message::CreateStep(stage) => {
+                self.create.stage = stage;
+                self.create.error = None;
                 Command::none()
             }
             Message::CreateNameChanged(name) => {
                 self.create.name = name;
                 Command::none()
             }
-            Message::CreateVersionChanged(version) => {
+            Message::CreateVersionSelected(version) => {
                 self.create.game_version = version;
+                self.refresh_loader_versions()
+            }
+            Message::CreateVersionQueryChanged(query) => {
+                self.create.game_version_query = query;
                 Command::none()
+            }
+            Message::CreateVersionsLoaded(result) => {
+                match result {
+                    Ok(mut versions) => {
+                        let mut seen = HashSet::new();
+                        versions.retain(|version| {
+                            !version.is_empty() && seen.insert(version.clone())
+                        });
+                        self.create.game_versions = versions;
+                        if self.create.game_versions.is_empty()
+                            && let Some(release) = &self.latest_release
+                        {
+                            self.create.game_versions.push(release.clone());
+                        }
+                        if !self.create.game_versions.is_empty()
+                            && !self
+                                .create
+                                .game_versions
+                                .contains(&self.create.game_version)
+                        {
+                            self.create.game_version =
+                                self.create.game_versions[0].clone();
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("could not load game versions: {error}");
+                        if let Some(release) = &self.latest_release {
+                            if self.create.game_versions.is_empty() {
+                                self.create.game_versions.push(release.clone());
+                            }
+                            if self.create.game_version.trim().is_empty() {
+                                self.create.game_version = release.clone();
+                            }
+                        }
+                    }
+                }
+                self.refresh_loader_versions()
             }
             Message::CreateLoaderChanged(index) => {
                 self.create.loader = index.min(CreateView::LOADERS.len() - 1);
+                self.refresh_loader_versions()
+            }
+            Message::CreateLoaderVersionsLoaded(
+                loader,
+                game_version,
+                result,
+            ) => {
+                if loader != self.create.loader
+                    || game_version != self.create.game_version
+                {
+                    return Command::none();
+                }
+                self.create.loader_versions_loading = false;
+                match result {
+                    Ok(versions) => {
+                        let mut seen = HashSet::new();
+                        self.create.loader_versions = versions
+                            .into_iter()
+                            .filter(|version| {
+                                !version.is_empty()
+                                    && seen.insert(version.clone())
+                            })
+                            .collect();
+                        if !self.create.loader_version.is_empty()
+                            && !self
+                                .create
+                                .loader_versions
+                                .contains(&self.create.loader_version)
+                        {
+                            self.create.loader_version.clear();
+                        }
+                    }
+                    Err(error) => {
+                        self.create.loader_versions.clear();
+                        self.create.loader_version.clear();
+                        self.create.loader_versions_error = Some(error);
+                    }
+                }
+                Command::none()
+            }
+            Message::CreateLoaderVersionQueryChanged(query) => {
+                self.create.loader_version_query = query;
+                Command::none()
+            }
+            Message::CreateLoaderVersionSelected(version) => {
+                self.create.loader_version = version;
                 Command::none()
             }
             Message::CreateInstance => {
@@ -2341,11 +2560,14 @@ impl App for FerrisoApp {
                 self.create.busy = true;
                 self.create.error = None;
                 self.status = "Creating instance…".into();
+                let loader_version = (!self.create.loader_version.is_empty())
+                    .then(|| self.create.loader_version.clone());
                 Command::perform(
                     create_instance(
                         self.create.name.clone(),
                         self.create.game_version.clone(),
                         self.create.loader(),
+                        loader_version,
                     ),
                     Message::CreateStarted,
                 )
@@ -2355,6 +2577,7 @@ impl App for FerrisoApp {
                 match result {
                     Ok(job) => {
                         self.create.open = false;
+                        self.create.stage = CreateStage::Choose;
                         self.status = "Instance install queued".into();
                         self.jobs.insert(0, JobView::from(job));
                         Command::perform(load_jobs(), Message::JobsLoaded)
@@ -4008,6 +4231,8 @@ impl App for FerrisoApp {
                 }
             }
             Message::BeginImport => {
+                self.create.open = false;
+                self.page = Page::Library;
                 self.library_form = Some(LibraryForm::Import {
                     base_path: String::new(),
                     folder: String::new(),
@@ -4543,6 +4768,76 @@ impl App for FerrisoApp {
     }
 }
 
+async fn load_loader_versions(
+    loader_index: usize,
+    game_version: String,
+) -> Result<Vec<String>, String> {
+    let loader =
+        CreateView::LOADERS[loader_index.min(CreateView::LOADERS.len() - 1)];
+    if loader == ModLoader::Vanilla {
+        return Ok(Vec::new());
+    }
+    let manifest = metadata::get_loader_versions(loader.as_meta_str())
+        .await
+        .map_err(describe)?;
+    let loaders = manifest
+        .game_versions
+        .iter()
+        .find(|version| {
+            version.id == game_version
+                || version.id.replace("${modrinth.gameVersion}", &game_version)
+                    == game_version
+        })
+        .map(|version| {
+            version
+                .version_group
+                .as_ref()
+                .and_then(|group_id| {
+                    manifest
+                        .version_groups
+                        .iter()
+                        .find(|group| group.id == *group_id)
+                })
+                .map(|group| group.loaders.as_slice())
+                .unwrap_or(version.loaders.as_slice())
+        })
+        .unwrap_or_default();
+
+    let mut versions: Vec<String> = loaders
+        .iter()
+        .filter(|version| version.stable)
+        .map(|version| version.id.clone())
+        .collect();
+    if versions.is_empty() {
+        versions = loaders.iter().map(|version| version.id.clone()).collect();
+    }
+    let mut seen = HashSet::new();
+    Ok(versions
+        .into_iter()
+        .filter(|version| seen.insert(version.clone()))
+        .collect())
+}
+
+async fn load_game_versions() -> Result<Vec<String>, String> {
+    let versions = theseus::tags::get_game_version_tags()
+        .await
+        .map_err(describe)?;
+    let mut releases: Vec<_> = versions
+        .into_iter()
+        .filter(|version| version.version_type == "release")
+        .collect();
+    releases.sort_by(|left, right| right.date.cmp(&left.date));
+
+    let mut seen = HashSet::new();
+    Ok(releases
+        .into_iter()
+        .filter_map(|version| {
+            seen.insert(version.version.clone())
+                .then_some(version.version)
+        })
+        .collect())
+}
+
 async fn boot() -> Result<BootData, String> {
     theseus::EventState::init().await.map_err(describe)?;
     start_event_listener();
@@ -4676,11 +4971,13 @@ async fn load_jobs() -> Result<Vec<JobView>, String> {
 async fn search_projects(
     query: String,
     kind: ProjectKind,
+    sort: BrowseSort,
 ) -> Result<Vec<ProjectView>, String> {
     let facets = format!("[[\"project_types:{}\"]]", kind.facet());
     let key = format!(
-        "?query={}&limit=20&facets={}",
+        "?query={}&limit=20&index={}&facets={}",
         urlencoding::encode(&query),
+        sort.api_index(),
         urlencoding::encode(&facets)
     );
     let results = cache::get_search_results_v3(&key, None)
@@ -6167,12 +6464,13 @@ async fn create_instance(
     name: String,
     game_version: String,
     loader: ModLoader,
+    loader_version: Option<String>,
 ) -> Result<InstallJobSnapshot, String> {
     install::create_instance(
         name,
         game_version,
         loader,
-        None,
+        loader_version,
         None,
         None,
         InstanceLink::Unmanaged,
@@ -6695,13 +6993,22 @@ mod tests {
     use base64::Engine as _;
 
     use super::{
-        CrashCause, InstanceView, ProjectKind, ProjectView, analyze_log_lines,
-        auth_code_from_path, compose_avatar, create_folder_in,
-        decode_data_icon, delete_entry, extract_invite_id, extract_login_code,
-        process_exit_succeeded, relative_file_path, rename_entry,
-        render_avatar_png, validate_entry_name,
+        BrowseSort, CrashCause, InstanceView, ProjectKind, ProjectView,
+        analyze_log_lines, auth_code_from_path, compose_avatar,
+        create_folder_in, decode_data_icon, delete_entry, extract_invite_id,
+        extract_login_code, process_exit_succeeded, relative_file_path,
+        rename_entry, render_avatar_png, validate_entry_name,
     };
     use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn browse_sort_maps_to_modrinth_indexes() {
+        assert_eq!(BrowseSort::Relevance.api_index(), "relevance");
+        assert_eq!(BrowseSort::Downloads.api_index(), "downloads");
+        assert_eq!(BrowseSort::Follows.api_index(), "follows");
+        assert_eq!(BrowseSort::Newest.api_index(), "newest");
+        assert_eq!(BrowseSort::Updated.api_index(), "updated");
+    }
 
     fn instance(name: &str, version: &str, loader: &str) -> InstanceView {
         InstanceView {
