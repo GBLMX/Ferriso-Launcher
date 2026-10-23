@@ -42,6 +42,11 @@ pub struct LatestLogCursor {
 #[serde(transparent)]
 pub struct CensoredString(String);
 impl CensoredString {
+    /// Consume the censored value for frontends that render its text.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+
     pub fn censor(mut s: String, credentials_list: &[Credentials]) -> Self {
         let username = whoami::username();
         s = s

@@ -4,25 +4,210 @@
 //! (the same setting the original app uses); this module turns that code into
 //! UI copy. English is the fallback for every unknown string.
 
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, HashMap},
+    fmt,
+    sync::OnceLock,
+};
 
 thread_local! {
-    static ZH_CN: Cell<bool> = const { Cell::new(false) };
+    static LOCALE: Cell<&'static str> = const { Cell::new("en-US") };
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Locale {
+    pub code: &'static str,
+    pub name: &'static str,
+}
+
+impl fmt::Display for Locale {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name)
+    }
+}
+
+pub const LOCALES: [Locale; 33] = [
+    Locale {
+        code: "ar-SA",
+        name: "العربية",
+    },
+    Locale {
+        code: "cs-CZ",
+        name: "Čeština",
+    },
+    Locale {
+        code: "da-DK",
+        name: "Dansk",
+    },
+    Locale {
+        code: "de-CH",
+        name: "Deutsch (Schweiz)",
+    },
+    Locale {
+        code: "de-DE",
+        name: "Deutsch",
+    },
+    Locale {
+        code: "en-US",
+        name: "English",
+    },
+    Locale {
+        code: "es-419",
+        name: "Español (Latinoamérica)",
+    },
+    Locale {
+        code: "es-ES",
+        name: "Español",
+    },
+    Locale {
+        code: "fi-FI",
+        name: "Suomi",
+    },
+    Locale {
+        code: "fil-PH",
+        name: "Filipino",
+    },
+    Locale {
+        code: "fr-FR",
+        name: "Français",
+    },
+    Locale {
+        code: "he-IL",
+        name: "עברית",
+    },
+    Locale {
+        code: "hu-HU",
+        name: "Magyar",
+    },
+    Locale {
+        code: "id-ID",
+        name: "Bahasa Indonesia",
+    },
+    Locale {
+        code: "it-IT",
+        name: "Italiano",
+    },
+    Locale {
+        code: "ja-JP",
+        name: "日本語",
+    },
+    Locale {
+        code: "ko-KR",
+        name: "한국어",
+    },
+    Locale {
+        code: "ms-MY",
+        name: "Bahasa Melayu",
+    },
+    Locale {
+        code: "nl-NL",
+        name: "Nederlands",
+    },
+    Locale {
+        code: "no-NO",
+        name: "Norsk",
+    },
+    Locale {
+        code: "pl-PL",
+        name: "Polski",
+    },
+    Locale {
+        code: "pt-BR",
+        name: "Português (Brasil)",
+    },
+    Locale {
+        code: "pt-PT",
+        name: "Português (Portugal)",
+    },
+    Locale {
+        code: "ro-RO",
+        name: "Română",
+    },
+    Locale {
+        code: "ru-RU",
+        name: "Русский",
+    },
+    Locale {
+        code: "sr-CS",
+        name: "Srpski",
+    },
+    Locale {
+        code: "sv-SE",
+        name: "Svenska",
+    },
+    Locale {
+        code: "th-TH",
+        name: "ไทย",
+    },
+    Locale {
+        code: "tr-TR",
+        name: "Türkçe",
+    },
+    Locale {
+        code: "uk-UA",
+        name: "Українська",
+    },
+    Locale {
+        code: "vi-VN",
+        name: "Tiếng Việt",
+    },
+    Locale {
+        code: "zh-CN",
+        name: "简体中文",
+    },
+    Locale {
+        code: "zh-TW",
+        name: "繁體中文",
+    },
+];
 
 /// Select the language dictionary for the current view build.
 pub fn set_locale(locale: &str) {
     let locale = locale.to_ascii_lowercase();
-    ZH_CN.with(|zh| zh.set(locale.starts_with("zh")));
+    let selected = LOCALES
+        .iter()
+        .find(|entry| entry.code.eq_ignore_ascii_case(&locale))
+        .or_else(|| {
+            let language = locale.split('-').next().unwrap_or_default();
+            LOCALES.iter().find(|entry| {
+                entry
+                    .code
+                    .split('-')
+                    .next()
+                    .is_some_and(|code| code.eq_ignore_ascii_case(language))
+            })
+        })
+        .map(|entry| entry.code)
+        .unwrap_or("en-US");
+    LOCALE.with(|current| current.set(selected));
 }
 
 /// Translate a UI string. Unknown strings pass through unchanged so metadata
 /// names, versions, paths, and backend errors are never rewritten.
 pub fn t(value: &str) -> &str {
-    if !ZH_CN.with(Cell::get) {
+    let locale = LOCALE.with(Cell::get);
+    if locale == "en-US" {
         return value;
     }
+    if locale == "zh-CN" {
+        let translated = zh_cn(value);
+        if !std::ptr::eq(translated, value) {
+            return translated;
+        }
+    }
+    if let Some(translated) =
+        catalogs().get(locale).and_then(|map| map.get(value))
+    {
+        return translated;
+    }
+    value
+}
 
+/// Hand-written Simplified Chinese copy. The generated catalog from the
+/// existing Modrinth locale files fills in labels that are shared with the
+/// web app; this dictionary covers launcher-specific strings.
+fn zh_cn(value: &str) -> &str {
     match value {
         "live" => "实时",
         "attention" => "注意",
@@ -139,6 +324,7 @@ pub fn t(value: &str) -> &str {
         "Telemetry" => "遥测",
         "Discord presence" => "Discord 状态",
         "Advanced rendering" => "高级渲染",
+        "Reduce motion" => "减少动态效果",
         "Native decorations" => "原生窗口装饰",
         "Force fullscreen" => "强制全屏",
         "Hide on game start" => "游戏启动时隐藏",
@@ -181,6 +367,8 @@ pub fn t(value: &str) -> &str {
         "Sign in to Modrinth" => "登录 Modrinth",
         "Create" => "创建",
         "Account" => "账户",
+        "Navigation" => "导航",
+        "Instances" => "实例",
         "Home" => "主页",
         "Browse" => "浏览",
         "Project" => "项目",
@@ -233,6 +421,7 @@ pub fn t(value: &str) -> &str {
         "EQUIPPED" => "已装备",
         "PREVIEWING" => "预览中",
         "Language" => "语言",
+        "High contrast" => "高对比度",
         "English" => "English",
         "简体中文" => "简体中文",
         "Theme" => "主题",
@@ -274,6 +463,96 @@ pub fn t(value: &str) -> &str {
         "Create invite link" => "创建邀请链接",
         "Creating…" => "创建中…",
         "Delete" => "删除",
+        "Files" => "文件",
+        "Loading files…" => "正在加载文件…",
+        "folder" => "文件夹",
+        "This folder is empty." => "此文件夹为空。",
+        "truncated" => "已截断",
+        "Binary files cannot be previewed" => "无法预览二进制文件",
+        "Not a file" => "不是文件",
+        "Invalid instance path" => "无效的实例路径",
+        "Path escapes the instance folder" => "路径超出实例目录",
+        "Refresh" => "刷新",
+        "New folder" => "新建文件夹",
+        "New folder name" => "新文件夹名称",
+        "Invalid file name" => "无效的文件名",
+
+        "A file with that name already exists" => "同名文件已存在",
+        "The instance root cannot be deleted" => "不能删除实例根目录",
+        "The instance root cannot be renamed" => "不能重命名实例根目录",
+        "Hosting" => "托管",
+        "Search servers…" => "搜索服务器…",
+        "servers" => "台服务器",
+        "No servers match your search." => "没有匹配的服务器。",
+        "Server name" => "服务器名称",
+        "Server renamed" => "服务器已重命名",
+        "Hosting dashboard" => "托管面板",
+        "Sign in to manage your hosted servers" => "登录后管理你的托管服务器",
+        "Modrinth Hosting servers are tied to your Modrinth account." => {
+            "Modrinth 托管服务器与你的 Modrinth 账号绑定。"
+        }
+        "Sign in" => "登录",
+        "Loading servers…" => "正在加载服务器…",
+        "No hosted servers yet" => "还没有托管服务器",
+        "Get a Modrinth-hosted server and it will appear here." => {
+            "获取一台 Modrinth 托管服务器后会显示在这里。"
+        }
+        "Explore hosting" => "了解托管服务",
+        "Needs attention" => "需要处理",
+        "Suspended" => "已暂停",
+        "Medal" => "奖章",
+        "Manage" => "管理",
+        "Working…" => "处理中…",
+        "Hosting action sent" => "托管操作已发送",
+        "Start" => "启动",
+        "Restart" => "重启",
+        "Stop" => "停止",
+        "Game closed" => "游戏已退出",
+        "Game crashed" => "游戏崩溃",
+        "Analyzing the latest logs…" => "正在分析最新日志…",
+        "What likely happened" => "可能的原因",
+        "Log excerpt" => "日志摘录",
+        "No crash report found" => "未找到崩溃报告",
+        "Out of memory" => "内存不足",
+        "Increase the instance memory or reduce render distance and mods." => {
+            "提高实例内存，或降低渲染距离并减少模组。"
+        }
+        "Wrong Java version" => "Java 版本不匹配",
+        "Install the Java version this Minecraft version expects." => {
+            "安装该 Minecraft 版本所需的 Java。"
+        }
+        "Java could not start" => "Java 无法启动",
+        "Check the selected Java path and JVM arguments." => {
+            "检查所选 Java 路径和 JVM 参数。"
+        }
+        "Graphics or window failure" => "图形或窗口失败",
+        "Try updating GPU drivers or disable advanced rendering." => {
+            "尝试更新显卡驱动，或关闭高级渲染。"
+        }
+        "Mod dependency conflict" => "模组依赖冲突",
+        "Check that all required mods and versions are installed." => {
+            "检查是否安装了全部必需模组及对应版本。"
+        }
+        "Duplicate mods" => "重复模组",
+        "Remove duplicate copies of the same mod." => {
+            "删除同一模组的重复文件。"
+        }
+        "Mod incompatibility" => "模组不兼容",
+        "Disable recently added mods and retry." => {
+            "禁用最近添加的模组后重试。"
+        }
+        "Network failure" => "网络故障",
+        "Check your connection and retry." => "检查网络连接后重试。",
+        "Login or session failure" => "登录或会话失效",
+        "Sign out and sign back in to your account." => "退出账号后重新登录。",
+        "Minecraft crash report" => "Minecraft 崩溃报告",
+        "Open the latest crash report for the full stack trace." => {
+            "打开最新崩溃报告查看完整堆栈。"
+        }
+        "Unexpected exit" => "异常退出",
+        "Review the log excerpt below and the latest crash report." => {
+            "查看下方日志摘录和最新崩溃报告。"
+        }
         "Delete all" => "全部删除",
         "Delete permanently" => "永久删除",
         "Detect installed Java" => "检测已安装的 Java",
@@ -304,6 +583,20 @@ pub fn t(value: &str) -> &str {
         }
         "Kill" => "终止",
         "Launch" => "启动",
+        "Quarantined" => "已隔离",
+        "Linked modpack" => "关联整合包",
+        "Installed version" => "已安装版本",
+        "Update modpack" => "更新整合包",
+        "Repair files" => "修复文件",
+        "Installing" => "安装中",
+        "Installing…" => "安装中…",
+        "Blocked" => "已阻止",
+        "Beta channel" => "测试通道",
+        "This instance is quarantined and cannot be launched" => {
+            "此实例已被隔离，无法启动"
+        }
+        "This instance has not finished installing" => "此实例尚未安装完成",
+        "Launch blocked" => "启动已阻止",
         "Launching…" => "启动中…",
         "Launch now" => "立即启动",
         "Leave shared instance" => "离开共享实例",
@@ -316,6 +609,9 @@ pub fn t(value: &str) -> &str {
         "Lock" => "锁定",
         "Locked" => "已锁定",
         "Logs" => "日志",
+        "Live console" => "实时控制台",
+        "running" => "运行中",
+        "Clear" => "清空",
         "Members" => "成员",
         "Microsoft sign-in" => "Microsoft 登录",
         "Modrinth account" => "Modrinth 账户",
@@ -396,7 +692,7 @@ pub fn t(value: &str) -> &str {
         "View" => "查看",
         "Waiting for launcher settings…" => "正在等待启动器设置…",
         "Welcome to Modrinth" => "欢迎使用 Modrinth",
-        "Working…" => "处理中…",
+
         "Worlds" => "世界",
         "Writes a .mrpack containing the instance content and overrides." => {
             "写入包含实例内容和覆盖项的 .mrpack 文件。"
@@ -420,6 +716,193 @@ pub fn t(value: &str) -> &str {
     }
 }
 
+fn load_entries(json: &'static str) -> BTreeMap<&'static str, &'static str> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return BTreeMap::new();
+    };
+    let Some(entries) = value.as_object() else {
+        return BTreeMap::new();
+    };
+    let mut result = BTreeMap::new();
+    for (key, entry) in entries {
+        let Some(message) =
+            entry.get("message").and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        let key: &'static str = Box::leak(key.clone().into_boxed_str());
+        let message: &'static str =
+            Box::leak(message.to_string().into_boxed_str());
+        result.insert(key, message);
+    }
+    result
+}
+
+static CATALOGS: OnceLock<
+    HashMap<&'static str, HashMap<&'static str, &'static str>>,
+> = OnceLock::new();
+
+fn catalogs()
+-> &'static HashMap<&'static str, HashMap<&'static str, &'static str>> {
+    CATALOGS.get_or_init(|| {
+        let english = load_entries(include_str!(
+            "../../app-frontend/src/locales/en-US/index.json"
+        ));
+        let mut catalogs = HashMap::new();
+        for (code, json) in LOCALE_FILES {
+            let entries = load_entries(json);
+            let mut translations = HashMap::new();
+            for (key, translated) in entries {
+                if let Some(source) = english.get(key) {
+                    let prefer = translations.get(source).is_none_or(
+                        |current: &&str| translated.len() < current.len(),
+                    );
+                    if prefer {
+                        translations.insert(*source, translated);
+                    }
+                }
+            }
+            catalogs.insert(code, translations);
+        }
+        catalogs
+    })
+}
+
+static LOCALE_FILES: [(&str, &str); 33] = [
+    (
+        "ar-SA",
+        include_str!("../../app-frontend/src/locales/ar-SA/index.json"),
+    ),
+    (
+        "cs-CZ",
+        include_str!("../../app-frontend/src/locales/cs-CZ/index.json"),
+    ),
+    (
+        "da-DK",
+        include_str!("../../app-frontend/src/locales/da-DK/index.json"),
+    ),
+    (
+        "de-CH",
+        include_str!("../../app-frontend/src/locales/de-CH/index.json"),
+    ),
+    (
+        "de-DE",
+        include_str!("../../app-frontend/src/locales/de-DE/index.json"),
+    ),
+    (
+        "en-US",
+        include_str!("../../app-frontend/src/locales/en-US/index.json"),
+    ),
+    (
+        "es-419",
+        include_str!("../../app-frontend/src/locales/es-419/index.json"),
+    ),
+    (
+        "es-ES",
+        include_str!("../../app-frontend/src/locales/es-ES/index.json"),
+    ),
+    (
+        "fi-FI",
+        include_str!("../../app-frontend/src/locales/fi-FI/index.json"),
+    ),
+    (
+        "fil-PH",
+        include_str!("../../app-frontend/src/locales/fil-PH/index.json"),
+    ),
+    (
+        "fr-FR",
+        include_str!("../../app-frontend/src/locales/fr-FR/index.json"),
+    ),
+    (
+        "he-IL",
+        include_str!("../../app-frontend/src/locales/he-IL/index.json"),
+    ),
+    (
+        "hu-HU",
+        include_str!("../../app-frontend/src/locales/hu-HU/index.json"),
+    ),
+    (
+        "id-ID",
+        include_str!("../../app-frontend/src/locales/id-ID/index.json"),
+    ),
+    (
+        "it-IT",
+        include_str!("../../app-frontend/src/locales/it-IT/index.json"),
+    ),
+    (
+        "ja-JP",
+        include_str!("../../app-frontend/src/locales/ja-JP/index.json"),
+    ),
+    (
+        "ko-KR",
+        include_str!("../../app-frontend/src/locales/ko-KR/index.json"),
+    ),
+    (
+        "ms-MY",
+        include_str!("../../app-frontend/src/locales/ms-MY/index.json"),
+    ),
+    (
+        "nl-NL",
+        include_str!("../../app-frontend/src/locales/nl-NL/index.json"),
+    ),
+    (
+        "no-NO",
+        include_str!("../../app-frontend/src/locales/no-NO/index.json"),
+    ),
+    (
+        "pl-PL",
+        include_str!("../../app-frontend/src/locales/pl-PL/index.json"),
+    ),
+    (
+        "pt-BR",
+        include_str!("../../app-frontend/src/locales/pt-BR/index.json"),
+    ),
+    (
+        "pt-PT",
+        include_str!("../../app-frontend/src/locales/pt-PT/index.json"),
+    ),
+    (
+        "ro-RO",
+        include_str!("../../app-frontend/src/locales/ro-RO/index.json"),
+    ),
+    (
+        "ru-RU",
+        include_str!("../../app-frontend/src/locales/ru-RU/index.json"),
+    ),
+    (
+        "sr-CS",
+        include_str!("../../app-frontend/src/locales/sr-CS/index.json"),
+    ),
+    (
+        "sv-SE",
+        include_str!("../../app-frontend/src/locales/sv-SE/index.json"),
+    ),
+    (
+        "th-TH",
+        include_str!("../../app-frontend/src/locales/th-TH/index.json"),
+    ),
+    (
+        "tr-TR",
+        include_str!("../../app-frontend/src/locales/tr-TR/index.json"),
+    ),
+    (
+        "uk-UA",
+        include_str!("../../app-frontend/src/locales/uk-UA/index.json"),
+    ),
+    (
+        "vi-VN",
+        include_str!("../../app-frontend/src/locales/vi-VN/index.json"),
+    ),
+    (
+        "zh-CN",
+        include_str!("../../app-frontend/src/locales/zh-CN/index.json"),
+    ),
+    (
+        "zh-TW",
+        include_str!("../../app-frontend/src/locales/zh-TW/index.json"),
+    ),
+];
+
 #[cfg(test)]
 mod tests {
     use super::{set_locale, t};
@@ -432,5 +915,14 @@ mod tests {
 
         set_locale("en-US");
         assert_eq!(t("Home"), "Home");
+
+        set_locale("de-DE");
+        assert_eq!(t("Home"), "Start");
+        set_locale("fr");
+        assert_eq!(t("Home"), "Accueil");
+        set_locale("ja-JP");
+        assert_eq!(t("Home"), "ホーム");
+        set_locale("zh-TW");
+        assert_eq!(t("Home"), "首頁");
     }
 }

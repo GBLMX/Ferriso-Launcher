@@ -29,6 +29,7 @@ assets = [
 base64 = { workspace = true }
 bytes = { workspace = true }
 either = { workspace = true }
+ferriso-access = { workspace = true }
 ferriso-config = { workspace = true }
 ferriso-core = { workspace = true }
 ferriso-diagnostics = { workspace = true }
@@ -49,3 +50,6 @@ webbrowser = { workspace = true }
 [[bin]]
 name = "ferriso-launcher"
 path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = { workspace = true }

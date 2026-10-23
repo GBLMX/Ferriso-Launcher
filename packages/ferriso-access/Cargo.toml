@@ -1,0 +1,20 @@
+[package]
+name = "ferriso-access"
+description = "AccessKit bridge for Ferriso's iced frontend."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+repository.workspace = true
+
+[dependencies]
+accesskit = "0.25"
+accesskit_winit = { version = "0.34", default-features = false, features = [
+  "accesskit_unix",
+  "async-io",
+  "rwh_06",
+] }
+winit = { version = "0.30", default-features = false, features = [
+  "x11",
+  "wayland",
+] }

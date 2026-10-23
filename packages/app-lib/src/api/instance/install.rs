@@ -1,8 +1,9 @@
-use crate::state::{JavaVersion, State};
+use crate::state::{InstanceLaunchContext, JavaVersion, State};
+use daedalus::minecraft::VersionInfo;
 
-pub async fn get_optimal_jre_key(
+async fn resolve_launch_info(
     instance_id: &str,
-) -> crate::Result<Option<JavaVersion>> {
+) -> crate::Result<(InstanceLaunchContext, VersionInfo)> {
     let state = State::get().await?;
     let context =
         crate::state::instances::commands::get_instance_launch_context(
@@ -38,9 +39,27 @@ pub async fn get_optimal_jre_key(
     )
     .await?;
 
+    Ok((context, version_info))
+}
+
+pub async fn get_optimal_jre_key(
+    instance_id: &str,
+) -> crate::Result<Option<JavaVersion>> {
+    let (context, version_info) = resolve_launch_info(instance_id).await?;
     crate::launcher::get_java_version_from_launch_context(
         &context,
         &version_info,
     )
     .await
+}
+
+/// The major Java version required by the instance's Minecraft version.
+pub async fn get_required_java_major(
+    instance_id: &str,
+) -> crate::Result<Option<u32>> {
+    let (_, version_info) = resolve_launch_info(instance_id).await?;
+    Ok(version_info
+        .java_version
+        .as_ref()
+        .map(|java| java.major_version))
 }

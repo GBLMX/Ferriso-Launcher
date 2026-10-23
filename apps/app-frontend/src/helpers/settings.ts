@@ -49,7 +49,6 @@ export type AppSettings = {
 
 	telemetry: boolean
 	discord_rpc: boolean
-	personalized_ads: boolean
 
 	extra_launch_args: string[]
 	custom_env_vars: [string, string][]

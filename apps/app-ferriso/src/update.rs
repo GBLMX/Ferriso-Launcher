@@ -172,6 +172,29 @@ mod tests {
     }
 
     #[test]
+    fn appimage_is_preferred_for_linux_install() {
+        let manifest: Manifest = serde_json::from_str(
+            r#"{
+                "version": "0.2.0",
+                "platforms": {
+                    "linux-x86_64": {
+                        "url": "https://example.invalid/ferriso.tar.gz",
+                        "install_urls": [
+                            "https://example.invalid/Ferriso.AppImage",
+                            "https://example.invalid/ferriso.deb"
+                        ]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let update =
+            update_from_manifest(manifest, "0.1.0", "linux-x86_64").unwrap();
+        assert!(update.install_url.ends_with(".AppImage"));
+        assert!(update.download_url.ends_with(".tar.gz"));
+    }
+
+    #[test]
     fn equal_or_unknown_platform_is_not_an_update() {
         let manifest: Manifest = serde_json::from_str(MANIFEST).unwrap();
         assert!(

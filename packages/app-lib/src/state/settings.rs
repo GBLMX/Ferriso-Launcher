@@ -72,6 +72,7 @@ pub enum FeatureFlag {
     FriendsOfflineCollapsed,
     FriendsPendingCollapsed,
     DismissedPhotosensitivityFilterWarning,
+    ReduceMotion,
 }
 
 impl Settings {
@@ -340,6 +341,12 @@ pub enum Theme {
     Oled,
     Retro,
     System,
+    Violet,
+    Rose,
+    Teal,
+    Crimson,
+    Emerald,
+    HighContrast,
 }
 
 impl Theme {
@@ -350,6 +357,12 @@ impl Theme {
             Theme::Oled => "oled",
             Theme::Retro => "retro",
             Theme::System => "system",
+            Theme::Violet => "violet",
+            Theme::Rose => "rose",
+            Theme::Teal => "teal",
+            Theme::Crimson => "crimson",
+            Theme::Emerald => "emerald",
+            Theme::HighContrast => "high-contrast",
         }
     }
 
@@ -360,6 +373,12 @@ impl Theme {
             "oled" => Theme::Oled,
             "retro" => Theme::Retro,
             "system" => Theme::System,
+            "violet" => Theme::Violet,
+            "rose" => Theme::Rose,
+            "teal" => Theme::Teal,
+            "crimson" => Theme::Crimson,
+            "emerald" => Theme::Emerald,
+            "high-contrast" => Theme::HighContrast,
             _ => Theme::Dark,
         }
     }
@@ -407,6 +426,33 @@ impl DefaultPage {
             "home" => Self::Home,
             "library" => Self::Library,
             _ => Self::Home,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Theme;
+
+    #[test]
+    fn color_presets_round_trip_through_settings_strings() {
+        for theme in [
+            Theme::Dark,
+            Theme::Light,
+            Theme::Oled,
+            Theme::Retro,
+            Theme::System,
+            Theme::Violet,
+            Theme::Rose,
+            Theme::Teal,
+            Theme::Crimson,
+            Theme::Emerald,
+            Theme::HighContrast,
+        ] {
+            assert_eq!(
+                Theme::from_string(theme.as_str()).as_str(),
+                theme.as_str()
+            );
         }
     }
 }

@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod accessibility;
 mod app;
 mod config;
 mod gui;

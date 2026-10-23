@@ -245,7 +245,8 @@ pub async fn emit_friend(payload: FriendPayload) -> crate::Result<()> {
 #[allow(unused_variables)]
 pub async fn emit_notification(payload: Value) -> crate::Result<()> {
     let event_state = crate::EventState::get();
-    event_state.send(AppEvent::Notification(serde_json::to_string(&payload)?))?;
+    event_state
+        .send(AppEvent::Notification(serde_json::to_string(&payload)?))?;
 
     Ok(())
 }

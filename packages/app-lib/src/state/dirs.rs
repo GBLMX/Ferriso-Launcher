@@ -530,9 +530,10 @@ pub(crate) fn restrict_dir(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(error) =
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        {
+        if let Err(error) = std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(0o700),
+        ) {
             tracing::warn!(%error, path = %path.display(), "could not restrict launcher data directory permissions");
         }
     }

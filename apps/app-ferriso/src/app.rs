@@ -5,9 +5,9 @@
 //! owned by the Ferriso actor.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     future::Future,
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
@@ -26,12 +26,13 @@ use serde_json::Value;
 use theseus::{
     State, cache,
     data::{
-        ContentType, Credentials, EditInstance, InstanceLaunchOverridesPatch,
-        InstanceLink, InstanceMetadata, MemorySettings, ModLoader,
-        OnboardingChecklist, ProcessMetadata, ResolutionPreferences, Settings,
-        Theme,
+        ContentType, Credentials, EditInstance, FeatureFlag,
+        InstanceLaunchOverridesPatch, InstanceLink, InstanceMetadata,
+        MemorySettings, ModLoader, OnboardingChecklist, ProcessMetadata,
+        ResolutionPreferences, Settings, Theme,
     },
     friends,
+    hosting::{self, HostingPowerAction},
     install::{self, InstallJobSnapshot, InstallJobStatus},
     instance::{self, InstallProjectWithDependenciesRequest, QuickPlayType},
     jre, logs, metadata, minecraft_auth,
@@ -94,16 +95,18 @@ pub enum Page {
     Instance,
     Account,
     Skins,
+    Hosting,
     Settings,
 }
 
 impl Page {
-    pub const NAV: [Self; 6] = [
+    pub const NAV: [Self; 7] = [
         Self::Home,
         Self::Browse,
         Self::Library,
         Self::Account,
         Self::Skins,
+        Self::Hosting,
         Self::Settings,
     ];
 
@@ -115,6 +118,7 @@ impl Page {
             "library" => Some(Self::Library),
             "account" => Some(Self::Account),
             "skins" => Some(Self::Skins),
+            "hosting" => Some(Self::Hosting),
             "settings" => Some(Self::Settings),
             _ => None,
         }
@@ -129,7 +133,33 @@ impl Page {
             Self::Instance => "Instance",
             Self::Account => "Account",
             Self::Skins => "Skins",
+            Self::Hosting => "Hosting",
             Self::Settings => "Settings",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LibrarySort {
+    Recent,
+    Name,
+    Playtime,
+}
+
+impl LibrarySort {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Recent => "Recent",
+            Self::Name => "Name",
+            Self::Playtime => "Playtime",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Recent => Self::Name,
+            Self::Name => Self::Playtime,
+            Self::Playtime => Self::Recent,
         }
     }
 }
@@ -202,6 +232,31 @@ pub struct InstanceView {
     pub launch_args: Vec<String>,
     pub group_ids: Vec<String>,
     pub shared: Option<SharedLinkView>,
+    pub quarantined: bool,
+    pub install_stage: String,
+    pub update_channel: String,
+}
+
+impl InstanceView {
+    pub fn is_installing(&self) -> bool {
+        matches!(
+            self.install_stage.as_str(),
+            "minecraft_installing" | "pack_installing" | "not_installed"
+        )
+    }
+
+    pub fn launchable(&self) -> bool {
+        !self.quarantined && self.install_stage == "installed"
+    }
+
+    pub fn matches_query(&self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        query.is_empty()
+            || self.name.to_lowercase().contains(&query)
+            || self.id.to_lowercase().contains(&query)
+            || self.game_version.to_lowercase().contains(&query)
+            || self.loader.to_lowercase().contains(&query)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -441,18 +496,25 @@ impl Default for CreateView {
 pub enum DetailTab {
     Overview,
     Content,
+    Files,
     Worlds,
     Logs,
 }
 
 impl DetailTab {
-    pub const ALL: [Self; 4] =
-        [Self::Overview, Self::Content, Self::Worlds, Self::Logs];
+    pub const ALL: [Self; 5] = [
+        Self::Overview,
+        Self::Content,
+        Self::Files,
+        Self::Worlds,
+        Self::Logs,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
             Self::Content => "Content",
+            Self::Files => "Files",
             Self::Worlds => "Worlds",
             Self::Logs => "Logs",
         }
@@ -606,10 +668,74 @@ impl InstanceEditForm {
 }
 
 #[derive(Clone, Debug)]
+pub struct LinkedModpackView {
+    pub project_id: String,
+    pub title: String,
+    pub version: Option<String>,
+    pub has_update: bool,
+    pub update_version_id: Option<String>,
+    pub update_version: Option<String>,
+}
+
+impl From<theseus::data::LinkedModpackInfo> for LinkedModpackView {
+    fn from(info: theseus::data::LinkedModpackInfo) -> Self {
+        Self {
+            project_id: info.project.id,
+            title: info.project.title,
+            version: info.version.map(|version| version.version_number),
+            has_update: info.has_update,
+            update_version_id: info.update_version_id,
+            update_version: info
+                .update_version
+                .map(|version| version.version_number),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct DetailData {
     pub content: Vec<ContentRow>,
     pub worlds: Vec<WorldRow>,
     pub logs: Vec<LogRow>,
+    pub modpack: Option<LinkedModpackView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct FilePreview {
+    pub name: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct FileView {
+    pub path: String,
+    pub entries: Vec<FileEntry>,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub preview: Option<FilePreview>,
+    pub rename: Option<FileRename>,
+    pub delete: Option<FileDelete>,
+    pub new_folder: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FileRename {
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct FileDelete {
+    pub path: String,
+    pub name: String,
 }
 
 #[derive(Clone, Debug)]
@@ -621,6 +747,8 @@ pub struct DetailView {
     pub content: Vec<ContentRow>,
     pub worlds: Vec<WorldRow>,
     pub logs: Vec<LogRow>,
+    pub modpack: Option<LinkedModpackView>,
+    pub files: Option<FileView>,
     pub versions: Option<VersionPicker>,
     pub log_view: Option<LogView>,
     pub world_form: Option<WorldForm>,
@@ -694,6 +822,84 @@ impl From<ProcessMetadata> for ProcessView {
         }
     }
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CrashCause {
+    OutOfMemory,
+    JavaVersion,
+    JavaLaunch,
+    Graphics,
+    ModResolution,
+    DuplicateMods,
+    ModConflict,
+    Network,
+    Authentication,
+    CrashReport,
+    Generic,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrashAnalysis {
+    pub causes: Vec<CrashCause>,
+    pub excerpt: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedServerView {
+    pub id: String,
+    pub name: String,
+    pub address: String,
+    pub status: String,
+    pub suspension_reason: Option<String>,
+    pub loader: Option<String>,
+    pub mc_version: Option<String>,
+    pub datacenter: String,
+    pub is_medal: bool,
+}
+
+impl From<hosting::HostedServer> for HostedServerView {
+    fn from(server: hosting::HostedServer) -> Self {
+        let address = server.address();
+        Self {
+            id: server.server_id,
+            address,
+            name: server.name,
+            status: server.status,
+            suspension_reason: server.suspension_reason,
+            loader: server.loader,
+            mc_version: server.mc_version,
+            datacenter: server.datacenter,
+            is_medal: server.is_medal,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostingRename {
+    pub server_id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct HostingView {
+    pub loading: bool,
+    pub loaded: bool,
+    pub error: Option<String>,
+    pub servers: Vec<HostedServerView>,
+    pub pending: Option<String>,
+    pub query: String,
+    pub renaming: Option<HostingRename>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProcessExitView {
+    pub instance_id: String,
+    pub instance_name: String,
+    pub detail: String,
+    pub success: bool,
+    pub analyzing: bool,
+    pub analysis: Option<CrashAnalysis>,
+    pub analysis_error: Option<String>,
+}
 
 #[derive(Clone, Debug)]
 pub struct SkinView {
@@ -755,6 +961,7 @@ pub enum SettingChange {
     ToggleForceFullscreen,
     ToggleHideOnProcessStart,
     ToggleSidebar,
+    ToggleReduceMotion,
 }
 
 #[derive(Clone, Debug)]
@@ -823,14 +1030,20 @@ pub struct ViewModel {
     pub latest_release: Option<String>,
     pub phase: f32,
     pub processes: Vec<ProcessView>,
+    pub exit: Option<ProcessExitView>,
+    pub hosting: HostingView,
     pub groups: Vec<instance::InstanceGroup>,
     pub selected_group: Option<String>,
     pub groups_open: bool,
     pub group_form: Option<GroupForm>,
+    pub library_query: String,
+    pub library_sort: LibrarySort,
     pub modrinth_account: Option<ModrinthAccountView>,
     pub modrinth_login: bool,
     pub friends: Vec<FriendView>,
     pub checklist: Option<OnboardingChecklist>,
+    pub live_log: String,
+    pub live_log_instance: Option<String>,
     pub friend_input: String,
     pub shared_open: bool,
     pub shared: Option<SharedView>,
@@ -887,6 +1100,23 @@ pub enum Message {
     CreateStarted(Result<InstallJobSnapshot, String>),
     DetailTab(DetailTab),
     DetailLoaded(String, Result<DetailData, String>),
+    FilesRefresh,
+    FileNavigate(String),
+    FilesLoaded(String, Result<Vec<FileEntry>, String>),
+    FilePreviewOpen(String),
+    FilePreviewLoaded(String, Result<FilePreview, String>),
+    FilePreviewClose,
+    FileAskRename(String),
+    FileRenameChanged(String),
+    FileRenameSave,
+    FileAskDelete(String),
+    FileDeleteCancel,
+    FileDeleteConfirm,
+    FileNewFolder,
+    FileNewFolderChanged(String),
+    FileNewFolderSave,
+    FileFormCancel,
+    FileActionDone(Result<(), String>),
     ToggleContent {
         path: String,
         enabled: bool,
@@ -944,6 +1174,9 @@ pub enum Message {
         path: String,
         locked: bool,
     },
+    UpdateModpack,
+    RepairInstance,
+    ModpackAction(Result<InstallJobSnapshot, String>),
     LockChanged(Result<(), String>),
     ShowVersions {
         path: String,
@@ -998,6 +1231,24 @@ pub enum Message {
     WorldBackupDone(Result<u64, String>),
     PollProcesses,
     ProcessesLoaded(Result<Vec<ProcessView>, String>),
+    ExitAnalyzed(String, Result<Option<CrashAnalysis>, String>),
+    DismissExit,
+    HostingRefresh,
+    HostingLoaded(Result<Vec<HostedServerView>, String>),
+    HostingPower {
+        server_id: String,
+        action: HostingPowerAction,
+    },
+    HostingPowerDone(Result<(), String>),
+    HostingQueryChanged(String),
+    HostingAskRename {
+        server_id: String,
+        name: String,
+    },
+    HostingRenameChanged(String),
+    HostingRenameSave,
+    HostingRenameCancel,
+    HostingRenamed(Result<(), String>),
     KillProcess(String),
     ProcessKilled(Result<(), String>),
     ToggleJobDetails(String),
@@ -1023,6 +1274,8 @@ pub enum Message {
     DeleteGroup(String),
     GroupDeleted(Result<String, String>),
     FilterGroup(Option<String>),
+    LibraryQueryChanged(String),
+    CycleLibrarySort,
     ToggleGroupMembership(String),
     BeginModrinthLogin,
     ModrinthLoginFinished(Result<ModrinthAccountView, String>),
@@ -1061,6 +1314,7 @@ pub enum Message {
     CheckUpdates,
     UpdateChecked(Result<Option<UpdateInfo>, String>),
     DismissUpdate,
+    ClearLiveLog,
     AnimationTick,
 }
 
@@ -1104,14 +1358,19 @@ pub struct FerrisoApp {
     latest_release: Option<String>,
     phase: f32,
     processes: Vec<ProcessView>,
+    exit: Option<ProcessExitView>,
+    hosting: HostingView,
     groups: Vec<instance::InstanceGroup>,
     selected_group: Option<String>,
     groups_open: bool,
     group_form: Option<GroupForm>,
+    library_query: String,
+    library_sort: LibrarySort,
     modrinth_account: Option<ModrinthAccountView>,
     modrinth_login: bool,
     friends: Vec<FriendView>,
     checklist: Option<OnboardingChecklist>,
+    live_logs: HashMap<String, VecDeque<String>>,
     friend_input: String,
     shared_open: bool,
     shared: Option<SharedView>,
@@ -1166,14 +1425,19 @@ impl FerrisoApp {
             latest_release: None,
             phase: 0.0,
             processes: Vec::new(),
+            exit: None,
+            hosting: HostingView::default(),
             groups: Vec::new(),
             selected_group: None,
             groups_open: false,
             group_form: None,
+            library_query: String::new(),
+            library_sort: LibrarySort::Recent,
             modrinth_account: None,
             modrinth_login: false,
             friends: Vec::new(),
             checklist: None,
+            live_logs: HashMap::new(),
             friend_input: String::new(),
             shared_open: false,
             shared: None,
@@ -1288,14 +1552,30 @@ impl FerrisoApp {
             latest_release: self.latest_release.clone(),
             phase: self.phase,
             processes: self.processes.clone(),
+            exit: self.exit.clone(),
+            hosting: self.hosting.clone(),
             groups: self.groups.clone(),
             selected_group: self.selected_group.clone(),
             groups_open: self.groups_open,
             group_form: self.group_form.clone(),
+            library_query: self.library_query.clone(),
+            library_sort: self.library_sort,
             modrinth_account: self.modrinth_account.clone(),
             modrinth_login: self.modrinth_login,
             friends: self.friends.clone(),
             checklist: self.checklist.clone(),
+            live_log: self
+                .selected
+                .as_ref()
+                .and_then(|id| self.live_logs.get(id))
+                .map(|lines| {
+                    lines.iter().cloned().collect::<Vec<_>>().join(
+                        "
+",
+                    )
+                })
+                .unwrap_or_default(),
+            live_log_instance: self.selected.clone(),
             friend_input: self.friend_input.clone(),
             shared_open: self.shared_open,
             shared: self.shared.clone(),
@@ -1444,6 +1724,39 @@ impl FerrisoApp {
         ])
     }
 
+    fn reload_files(&mut self, path: String) -> Command<Message> {
+        let Some(instance_id) = self.selected.clone() else {
+            return Command::none();
+        };
+        if let Some(detail) = self.detail.as_mut() {
+            let preview = detail
+                .files
+                .as_ref()
+                .filter(|files| files.path == path)
+                .and_then(|files| files.preview.clone());
+            detail.files = Some(FileView {
+                path: path.clone(),
+                entries: Vec::new(),
+                loading: true,
+                error: None,
+                preview,
+                rename: None,
+                delete: None,
+                new_folder: None,
+            });
+        }
+        let message_path = path.clone();
+        Command::perform(load_files(instance_id, path), move |result| {
+            Message::FilesLoaded(message_path, result)
+        })
+    }
+
+    fn load_hosting(&mut self) -> Command<Message> {
+        self.hosting.loading = true;
+        self.hosting.error = None;
+        Command::perform(list_hosted_servers(), Message::HostingLoaded)
+    }
+
     fn load_browse(&mut self) -> Command<Message> {
         self.browse.loading = true;
         self.browse.error = None;
@@ -1481,6 +1794,7 @@ impl App for FerrisoApp {
                             .unwrap_or_else(|| "No instances yet".to_string());
                     }
                     Err(error) => {
+                        eprintln!("launcher boot failed: {error}");
                         self.error = Some(error);
                         self.status = "Failed to initialize".into();
                         return Command::none();
@@ -1501,6 +1815,12 @@ impl App for FerrisoApp {
                         load_skins(),
                         Message::SkinsLoaded,
                     ));
+                }
+                if self.page == Page::Hosting
+                    && !self.hosting.loaded
+                    && !self.hosting.loading
+                {
+                    commands.push(self.load_hosting());
                 }
                 commands.push(Command::perform(
                     update::check(),
@@ -1531,6 +1851,8 @@ impl App for FerrisoApp {
                         content: Vec::new(),
                         worlds: Vec::new(),
                         logs: Vec::new(),
+                        modpack: None,
+                        files: None,
                         versions: None,
                         log_view: None,
                         world_form: None,
@@ -1580,6 +1902,12 @@ impl App for FerrisoApp {
                         Message::SkinsLoaded,
                     ));
                 }
+                if page == Page::Hosting
+                    && !self.hosting.loaded
+                    && !self.hosting.loading
+                {
+                    commands.push(self.load_hosting());
+                }
                 Command::batch(commands)
             }
             Message::Back => {
@@ -1607,6 +1935,8 @@ impl App for FerrisoApp {
                     content: Vec::new(),
                     worlds: Vec::new(),
                     logs: Vec::new(),
+                    modpack: None,
+                    files: None,
                     versions: None,
                     log_view: None,
                     world_form: None,
@@ -1620,6 +1950,20 @@ impl App for FerrisoApp {
                 if self.launching.is_some() {
                     return Command::none();
                 }
+                if let Some(instance) =
+                    self.instances.iter().find(|instance| instance.id == id)
+                    && !instance.launchable()
+                {
+                    self.error = Some(if instance.quarantined {
+                        "This instance is quarantined and cannot be launched"
+                            .into()
+                    } else {
+                        "This instance has not finished installing".into()
+                    });
+                    self.status = "Launch blocked".into();
+                    return Command::none();
+                }
+                self.live_logs.remove(&id);
                 self.launching = Some(id.clone());
                 self.error = None;
                 self.status = "Launching…".into();
@@ -2026,6 +2370,15 @@ impl App for FerrisoApp {
                 if let Some(detail) = &mut self.detail {
                     detail.tab = tab;
                 }
+                if tab == DetailTab::Files {
+                    let path = self
+                        .detail
+                        .as_ref()
+                        .and_then(|detail| detail.files.as_ref())
+                        .map(|files| files.path.clone())
+                        .unwrap_or_default();
+                    return self.reload_files(path);
+                }
                 Command::none()
             }
             Message::DetailLoaded(id, result) => {
@@ -2047,6 +2400,8 @@ impl App for FerrisoApp {
                             content: data.content,
                             worlds: data.worlds,
                             logs: data.logs,
+                            modpack: data.modpack,
+                            files: None,
                             versions: None,
                             log_view: None,
                             world_form: None,
@@ -2061,11 +2416,282 @@ impl App for FerrisoApp {
                             content: Vec::new(),
                             worlds: Vec::new(),
                             logs: Vec::new(),
+                            modpack: None,
+                            files: None,
                             versions: None,
                             log_view: None,
                             world_form: None,
                         });
                     }
+                }
+                Command::none()
+            }
+            Message::FileAskRename(name) => {
+                if let Some(files) = self
+                    .detail
+                    .as_mut()
+                    .and_then(|detail| detail.files.as_mut())
+                {
+                    let path = if files.path.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}/{}", files.path, name)
+                    };
+                    files.rename = Some(FileRename { path, name });
+                    files.delete = None;
+                    files.new_folder = None;
+                }
+                Command::none()
+            }
+            Message::FileRenameChanged(name) => {
+                if let Some(rename) = self
+                    .detail
+                    .as_mut()
+                    .and_then(|detail| detail.files.as_mut())
+                    .and_then(|files| files.rename.as_mut())
+                {
+                    rename.name = name;
+                }
+                Command::none()
+            }
+            Message::FileRenameSave => {
+                let Some(instance_id) = self.selected.clone() else {
+                    return Command::none();
+                };
+                let Some(rename) = self
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.files.as_ref())
+                    .and_then(|files| files.rename.clone())
+                else {
+                    return Command::none();
+                };
+                Command::perform(
+                    rename_file(instance_id, rename.path, rename.name),
+                    Message::FileActionDone,
+                )
+            }
+            Message::FileAskDelete(name) => {
+                if let Some(files) = self
+                    .detail
+                    .as_mut()
+                    .and_then(|detail| detail.files.as_mut())
+                {
+                    let path = if files.path.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}/{}", files.path, name)
+                    };
+                    files.delete = Some(FileDelete { path, name });
+                    files.rename = None;
+                    files.new_folder = None;
+                }
+                Command::none()
+            }
+            Message::FileDeleteCancel | Message::FileFormCancel => {
+                if let Some(files) = self
+                    .detail
+                    .as_mut()
+                    .and_then(|detail| detail.files.as_mut())
+                {
+                    files.rename = None;
+                    files.delete = None;
+                    files.new_folder = None;
+                }
+                Command::none()
+            }
+            Message::FileDeleteConfirm => {
+                let Some(instance_id) = self.selected.clone() else {
+                    return Command::none();
+                };
+                let Some(delete) = self
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.files.as_ref())
+                    .and_then(|files| files.delete.clone())
+                else {
+                    return Command::none();
+                };
+                Command::perform(
+                    delete_file(instance_id, delete.path),
+                    Message::FileActionDone,
+                )
+            }
+            Message::FileNewFolder => {
+                if let Some(files) = self
+                    .detail
+                    .as_mut()
+                    .and_then(|detail| detail.files.as_mut())
+                {
+                    files.new_folder = Some(String::new());
+                    files.rename = None;
+                    files.delete = None;
+                }
+                Command::none()
+            }
+            Message::FileNewFolderChanged(name) => {
+                if let Some(files) = self
+                    .detail
+                    .as_mut()
+                    .and_then(|detail| detail.files.as_mut())
+                {
+                    files.new_folder = Some(name);
+                }
+                Command::none()
+            }
+            Message::FileNewFolderSave => {
+                let Some(instance_id) = self.selected.clone() else {
+                    return Command::none();
+                };
+                let Some(path) = self
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.files.as_ref())
+                    .map(|files| files.path.clone())
+                else {
+                    return Command::none();
+                };
+                let Some(name) = self
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.files.as_ref())
+                    .and_then(|files| files.new_folder.clone())
+                else {
+                    return Command::none();
+                };
+                Command::perform(
+                    create_folder(instance_id, path, name),
+                    Message::FileActionDone,
+                )
+            }
+            Message::FileActionDone(result) => {
+                if let Some(files) = self
+                    .detail
+                    .as_mut()
+                    .and_then(|detail| detail.files.as_mut())
+                {
+                    files.rename = None;
+                    files.delete = None;
+                    files.new_folder = None;
+                    files.preview = None;
+                    if let Err(error) = &result {
+                        files.error = Some(error.clone());
+                    }
+                }
+                match result {
+                    Ok(()) => {
+                        let path = self
+                            .detail
+                            .as_ref()
+                            .and_then(|detail| detail.files.as_ref())
+                            .map(|files| files.path.clone())
+                            .unwrap_or_default();
+                        self.reload_files(path)
+                    }
+                    Err(error) => {
+                        self.error = Some(error);
+                        Command::none()
+                    }
+                }
+            }
+            Message::FilesRefresh => {
+                let path = self
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.files.as_ref())
+                    .map(|files| files.path.clone())
+                    .unwrap_or_default();
+                self.reload_files(path)
+            }
+            Message::FileNavigate(name) => {
+                let current = self
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.files.as_ref())
+                    .map(|files| files.path.as_str())
+                    .unwrap_or("");
+                let next = if name == ".." {
+                    current
+                        .rsplit_once('/')
+                        .map(|(parent, _)| parent)
+                        .unwrap_or("")
+                        .to_string()
+                } else if current.is_empty() {
+                    name
+                } else {
+                    format!("{current}/{name}")
+                };
+                self.reload_files(next)
+            }
+            Message::FilesLoaded(path, result) => {
+                if let Some(files) = self
+                    .detail
+                    .as_mut()
+                    .and_then(|detail| detail.files.as_mut())
+                    && files.path == path
+                {
+                    files.loading = false;
+                    match result {
+                        Ok(entries) => {
+                            files.entries = entries;
+                            files.error = None;
+                        }
+                        Err(error) => {
+                            files.entries.clear();
+                            files.error = Some(error);
+                        }
+                    }
+                }
+                Command::none()
+            }
+            Message::FilePreviewOpen(name) => {
+                let Some(instance_id) = self.selected.clone() else {
+                    return Command::none();
+                };
+                let Some(files) = self
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.files.as_ref())
+                else {
+                    return Command::none();
+                };
+                let path = if files.path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{}", files.path, name)
+                };
+                let message_path = path.clone();
+                Command::perform(
+                    load_file_preview(instance_id, path),
+                    move |result| {
+                        Message::FilePreviewLoaded(message_path, result)
+                    },
+                )
+            }
+            Message::FilePreviewLoaded(path, result) => {
+                if let Some(files) = self
+                    .detail
+                    .as_mut()
+                    .and_then(|detail| detail.files.as_mut())
+                    && (files.path.is_empty() && !path.contains('/')
+                        || path
+                            .rsplit_once('/')
+                            .is_some_and(|(parent, _)| parent == files.path))
+                {
+                    match result {
+                        Ok(preview) => files.preview = Some(preview),
+                        Err(error) => files.error = Some(error),
+                    }
+                }
+                Command::none()
+            }
+            Message::FilePreviewClose => {
+                if let Some(files) = self
+                    .detail
+                    .as_mut()
+                    .and_then(|detail| detail.files.as_mut())
+                {
+                    files.preview = None;
                 }
                 Command::none()
             }
@@ -2098,6 +2724,51 @@ impl App for FerrisoApp {
                 Ok(()) => self.reload_detail(),
                 Err(error) => {
                     self.error = Some(error);
+                    Command::none()
+                }
+            },
+            Message::UpdateModpack => {
+                let Some(instance_id) = self.selected.clone() else {
+                    return Command::none();
+                };
+                let Some(version_id) = self
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.modpack.as_ref())
+                    .and_then(|modpack| modpack.update_version_id.clone())
+                else {
+                    self.error =
+                        Some("The linked modpack has no update".into());
+                    return Command::none();
+                };
+                self.status = "Updating modpack…".into();
+                Command::perform(
+                    update_modpack(instance_id, version_id),
+                    Message::ModpackAction,
+                )
+            }
+            Message::RepairInstance => {
+                let Some(instance_id) = self.selected.clone() else {
+                    return Command::none();
+                };
+                self.status = "Repairing modpack…".into();
+                Command::perform(
+                    repair_instance(instance_id),
+                    Message::ModpackAction,
+                )
+            }
+            Message::ModpackAction(result) => match result {
+                Ok(job) => {
+                    self.jobs.insert(0, JobView::from(job));
+                    self.status = "Modpack install queued".into();
+                    Command::batch([
+                        Command::perform(load_jobs(), Message::JobsLoaded),
+                        self.reload_detail(),
+                    ])
+                }
+                Err(error) => {
+                    self.error = Some(error);
+                    self.status = "Modpack action failed".into();
                     Command::none()
                 }
             },
@@ -2714,6 +3385,99 @@ impl App for FerrisoApp {
                 }
                 Command::none()
             }
+            Message::HostingQueryChanged(query) => {
+                self.hosting.query = query;
+                Command::none()
+            }
+            Message::HostingAskRename { server_id, name } => {
+                self.hosting.renaming = Some(HostingRename { server_id, name });
+                Command::none()
+            }
+            Message::HostingRenameChanged(name) => {
+                if let Some(rename) = self.hosting.renaming.as_mut() {
+                    rename.name = name;
+                }
+                Command::none()
+            }
+            Message::HostingRenameCancel => {
+                self.hosting.renaming = None;
+                Command::none()
+            }
+            Message::HostingRenameSave => {
+                let Some(rename) = self.hosting.renaming.clone() else {
+                    return Command::none();
+                };
+                Command::perform(
+                    rename_hosted_server(rename.server_id, rename.name),
+                    Message::HostingRenamed,
+                )
+            }
+            Message::HostingRenamed(result) => match result {
+                Ok(()) => {
+                    self.hosting.renaming = None;
+                    self.status = "Server renamed".into();
+                    self.load_hosting()
+                }
+                Err(error) => {
+                    self.error = Some(error);
+                    Command::none()
+                }
+            },
+            Message::HostingRefresh => self.load_hosting(),
+            Message::HostingLoaded(result) => {
+                self.hosting.loading = false;
+                self.hosting.loaded = true;
+                match result {
+                    Ok(servers) => {
+                        self.hosting.servers = servers;
+                        self.hosting.error = None;
+                    }
+                    Err(error) => {
+                        self.hosting.servers.clear();
+                        self.hosting.error = Some(error);
+                    }
+                }
+                Command::none()
+            }
+            Message::HostingPower { server_id, action } => {
+                if self.hosting.pending.is_some() {
+                    return Command::none();
+                }
+                self.hosting.pending = Some(server_id.clone());
+                Command::perform(
+                    set_hosted_server_power(server_id, action),
+                    Message::HostingPowerDone,
+                )
+            }
+            Message::HostingPowerDone(result) => {
+                self.hosting.pending = None;
+                match result {
+                    Ok(()) => {
+                        self.status = "Hosting action sent".into();
+                        self.load_hosting()
+                    }
+                    Err(error) => {
+                        self.error = Some(error);
+                        Command::none()
+                    }
+                }
+            }
+            Message::ExitAnalyzed(instance_id, result) => {
+                if let Some(exit) = self.exit.as_mut()
+                    && exit.instance_id == instance_id
+                {
+                    exit.analyzing = false;
+                    match result {
+                        Ok(analysis) => exit.analysis = analysis,
+                        Err(error) => exit.analysis_error = Some(error),
+                    }
+                }
+                Command::none()
+            }
+            Message::DismissExit => {
+                self.exit = None;
+                Command::none()
+            }
             Message::KillProcess(uuid) => {
                 Command::perform(kill_process(uuid), Message::ProcessKilled)
             }
@@ -2809,6 +3573,14 @@ impl App for FerrisoApp {
             },
             Message::FilterGroup(id) => {
                 self.selected_group = id;
+                Command::none()
+            }
+            Message::LibraryQueryChanged(query) => {
+                self.library_query = query;
+                Command::none()
+            }
+            Message::CycleLibrarySort => {
+                self.library_sort = self.library_sort.next();
                 Command::none()
             }
             Message::ToggleGroupMembership(id) => {
@@ -3569,6 +4341,9 @@ impl App for FerrisoApp {
                 let Some(next) = apply_setting(settings, change) else {
                     return Command::none();
                 };
+                if reduce_motion(&next) {
+                    self.phase = 0.0;
+                }
                 self.settings = Some(next.clone());
                 Command::perform(save_settings(next), Message::SettingsSaved)
             }
@@ -3614,8 +4389,20 @@ impl App for FerrisoApp {
                 self.update = None;
                 Command::none()
             }
+            Message::ClearLiveLog => {
+                if let Some(id) = &self.selected {
+                    self.live_logs.remove(id);
+                }
+                Command::none()
+            }
             Message::AnimationTick => {
-                self.phase = (self.phase + 0.07) % std::f32::consts::TAU;
+                if self
+                    .settings
+                    .as_ref()
+                    .is_none_or(|settings| !reduce_motion(settings))
+                {
+                    self.phase = (self.phase + 0.07) % std::f32::consts::TAU;
+                }
                 let events: Vec<theseus::AppEvent> = EVENT_QUEUE
                     .get_or_init(|| Mutex::new(VecDeque::new()))
                     .lock()
@@ -3624,6 +4411,7 @@ impl App for FerrisoApp {
                 let mut reload = false;
                 let mut refresh_processes = false;
                 let mut refresh_jobs = false;
+                let mut finished_process: Option<(String, bool)> = None;
                 for event in events {
                     match event {
                         theseus::AppEvent::InstallJob(job) => {
@@ -3639,8 +4427,36 @@ impl App for FerrisoApp {
                             }
                             refresh_jobs = true;
                         }
-                        theseus::AppEvent::Process(_) => {
+                        theseus::AppEvent::Process(payload) => {
                             refresh_processes = true;
+                            if matches!(
+                                payload.event,
+                                theseus::ProcessPayloadType::Finished
+                            ) {
+                                let success =
+                                    process_exit_succeeded(&payload.message);
+                                let instance_name = self
+                                    .instances
+                                    .iter()
+                                    .find(|instance| {
+                                        instance.id == payload.instance_id
+                                    })
+                                    .map(|instance| instance.name.clone())
+                                    .unwrap_or_else(|| {
+                                        payload.instance_id.clone()
+                                    });
+                                self.exit = Some(ProcessExitView {
+                                    instance_id: payload.instance_id.clone(),
+                                    instance_name,
+                                    detail: payload.message.clone(),
+                                    success,
+                                    analyzing: !success,
+                                    analysis: None,
+                                    analysis_error: None,
+                                });
+                                finished_process =
+                                    Some((payload.instance_id, success));
+                            }
                         }
                         theseus::AppEvent::Instance(_)
                         | theseus::AppEvent::InstanceGroupsChanged(_) => {
@@ -3655,6 +4471,36 @@ impl App for FerrisoApp {
                         }
                         theseus::AppEvent::OnboardingChecklist(checklist) => {
                             self.checklist = Some(checklist);
+                        }
+                        theseus::AppEvent::Log(payload) => {
+                            let line = match payload.event {
+                                theseus::LogEvent::Legacy { message } => {
+                                    message
+                                }
+                                theseus::LogEvent::Log4j(event) => format!(
+                                    "{} [{}] {}: {}",
+                                    event
+                                        .timestamp_millis
+                                        .map(|value| value.to_string())
+                                        .unwrap_or_default(),
+                                    event.thread_name.as_deref().unwrap_or(""),
+                                    event.level.as_deref().unwrap_or("INFO"),
+                                    event.message.as_deref().unwrap_or("")
+                                ),
+                            };
+                            let lines = self
+                                .live_logs
+                                .entry(payload.instance_id)
+                                .or_default();
+                            for line in line.lines() {
+                                lines.push_back(line.to_string());
+                            }
+                            while lines.len() > 400
+                                || lines.iter().map(String::len).sum::<usize>()
+                                    > 96 * 1024
+                            {
+                                lines.pop_front();
+                            }
                         }
                         _ => {}
                     }
@@ -3677,6 +4523,14 @@ impl App for FerrisoApp {
                     commands.push(Command::perform(
                         load_jobs(),
                         Message::JobsLoaded,
+                    ));
+                }
+                if let Some((instance_id, false)) = finished_process {
+                    commands.push(Command::perform(
+                        analyze_exit(instance_id.clone()),
+                        move |result| {
+                            Message::ExitAnalyzed(instance_id, result)
+                        },
                     ));
                 }
                 Command::batch(commands)
@@ -4136,10 +4990,274 @@ async fn install_project_version(
     install_to_instance_version(instance_id, project, Some(version_id)).await
 }
 
+async fn update_modpack(
+    instance_id: String,
+    version_id: String,
+) -> Result<InstallJobSnapshot, String> {
+    instance::update_managed_modrinth_version(&instance_id, &version_id)
+        .await
+        .map_err(describe)
+}
+
+async fn repair_instance(
+    instance_id: String,
+) -> Result<InstallJobSnapshot, String> {
+    instance::repair_managed_modrinth(&instance_id)
+        .await
+        .map_err(describe)
+}
+
+fn relative_file_path(value: &str) -> Result<PathBuf, String> {
+    let mut path = PathBuf::new();
+    for component in Path::new(value).components() {
+        match component {
+            Component::Normal(name) => path.push(name),
+            Component::CurDir => {}
+            Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err("Invalid instance path".into());
+            }
+        }
+    }
+    Ok(path)
+}
+
+async fn instance_root(instance_id: &str) -> Result<PathBuf, String> {
+    let metadata = instance::get(instance_id)
+        .await
+        .map_err(describe)?
+        .ok_or_else(|| "Unknown instance".to_string())?;
+    tokio::fs::canonicalize(&metadata.instance.path)
+        .await
+        .map_err(|error| format!("Could not open instance folder: {error}"))
+}
+
+async fn instance_file_path(
+    instance_id: &str,
+    relative: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let root = instance_root(instance_id).await?;
+    let relative = relative_file_path(relative)?;
+    let target = root.join(relative);
+    let target = tokio::fs::canonicalize(&target)
+        .await
+        .map_err(|error| format!("Could not open path: {error}"))?;
+    if !target.starts_with(&root) {
+        return Err("Path escapes the instance folder".into());
+    }
+    Ok((root, target))
+}
+
+async fn load_files(
+    instance_id: String,
+    relative: String,
+) -> Result<Vec<FileEntry>, String> {
+    let (_, target) = instance_file_path(&instance_id, &relative).await?;
+    let mut entries = Vec::new();
+    let mut reader = tokio::fs::read_dir(&target)
+        .await
+        .map_err(|error| format!("Could not list folder: {error}"))?;
+    while let Some(entry) = reader
+        .next_entry()
+        .await
+        .map_err(|error| format!("Could not read folder entry: {error}"))?
+    {
+        let file_type = entry.file_type().await.ok();
+        let is_dir = file_type.is_some_and(|kind| kind.is_dir());
+        let size = if is_dir {
+            0
+        } else {
+            entry.metadata().await.map(|meta| meta.len()).unwrap_or(0)
+        };
+        entries.push(FileEntry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            is_dir,
+            size,
+        });
+    }
+    entries.sort_by(|left, right| {
+        right.is_dir.cmp(&left.is_dir).then_with(|| {
+            left.name.to_lowercase().cmp(&right.name.to_lowercase())
+        })
+    });
+    Ok(entries)
+}
+
+async fn load_file_preview(
+    instance_id: String,
+    relative: String,
+) -> Result<FilePreview, String> {
+    const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
+    let (_, target) = instance_file_path(&instance_id, &relative).await?;
+    let metadata = tokio::fs::metadata(&target)
+        .await
+        .map_err(|error| format!("Could not read file metadata: {error}"))?;
+    if !metadata.is_file() {
+        return Err("Not a file".into());
+    }
+    let truncated = metadata.len() > MAX_PREVIEW_BYTES;
+    let file = tokio::fs::File::open(&target)
+        .await
+        .map_err(|error| format!("Could not open file: {error}"))?;
+    let mut bytes = Vec::with_capacity(MAX_PREVIEW_BYTES as usize);
+    file.take(MAX_PREVIEW_BYTES)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| format!("Could not read file: {error}"))?;
+    if bytes.iter().take(8192).any(|byte| *byte == 0) {
+        return Err("Binary files cannot be previewed".into());
+    }
+    Ok(FilePreview {
+        name: target
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| relative.clone()),
+        content: String::from_utf8_lossy(&bytes).into_owned(),
+        truncated,
+    })
+}
+
+fn validate_entry_name(name: &str) -> Result<&str, String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        return Err("Invalid file name".into());
+    }
+    Ok(name)
+}
+
+async fn instance_entry_path(
+    instance_id: &str,
+    relative: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let root = instance_root(instance_id).await?;
+    let relative = relative_file_path(relative)?;
+    if relative.as_os_str().is_empty() {
+        return Err("The instance root cannot be modified".into());
+    }
+    let parent_relative =
+        relative.parent().map(Path::to_path_buf).unwrap_or_default();
+    let parent = if parent_relative.as_os_str().is_empty() {
+        root.clone()
+    } else {
+        tokio::fs::canonicalize(root.join(parent_relative))
+            .await
+            .map_err(|error| format!("Invalid instance path: {error}"))?
+    };
+    if !parent.starts_with(&root) || !parent.is_dir() {
+        return Err("Path escapes the instance folder".into());
+    }
+    let name = relative
+        .file_name()
+        .ok_or_else(|| "Invalid file name".to_string())?;
+    let target = parent.join(name);
+    if !target.starts_with(&root) {
+        return Err("Path escapes the instance folder".into());
+    }
+    Ok((root, target))
+}
+
+async fn rename_file(
+    instance_id: String,
+    relative: String,
+    new_name: String,
+) -> Result<(), String> {
+    let (root, target) = instance_entry_path(&instance_id, &relative).await?;
+    rename_entry(&root, target, &new_name).await
+}
+
+async fn rename_entry(
+    root: &Path,
+    target: PathBuf,
+    new_name: &str,
+) -> Result<(), String> {
+    if target == root {
+        return Err("The instance root cannot be renamed".into());
+    }
+    let new_name = validate_entry_name(new_name)?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| "Cannot rename the instance root".to_string())?;
+    let destination = parent.join(new_name);
+    if tokio::fs::symlink_metadata(&destination).await.is_ok() {
+        return Err("A file with that name already exists".into());
+    }
+    if !destination.starts_with(root) {
+        return Err("Path escapes the instance folder".into());
+    }
+    tokio::fs::rename(&target, &destination)
+        .await
+        .map_err(|error| format!("Could not rename: {error}"))
+}
+
+async fn delete_file(
+    instance_id: String,
+    relative: String,
+) -> Result<(), String> {
+    let (root, target) = instance_entry_path(&instance_id, &relative).await?;
+    delete_entry(&root, target).await
+}
+
+async fn delete_entry(root: &Path, target: PathBuf) -> Result<(), String> {
+    if target == root || !target.starts_with(root) {
+        return Err("The instance root cannot be deleted".into());
+    }
+    let metadata = tokio::fs::symlink_metadata(&target)
+        .await
+        .map_err(|error| format!("Could not inspect path: {error}"))?;
+    if metadata.is_dir() {
+        tokio::fs::remove_dir_all(&target)
+            .await
+            .map_err(|error| format!("Could not delete folder: {error}"))
+    } else {
+        tokio::fs::remove_file(&target)
+            .await
+            .map_err(|error| format!("Could not delete file: {error}"))
+    }
+}
+
+async fn create_folder(
+    instance_id: String,
+    relative: String,
+    name: String,
+) -> Result<(), String> {
+    let (root, parent) = instance_file_path(&instance_id, &relative).await?;
+    create_folder_in(&root, parent, &name).await
+}
+
+async fn create_folder_in(
+    root: &Path,
+    parent: PathBuf,
+    name: &str,
+) -> Result<(), String> {
+    if !parent.starts_with(root) || !parent.is_dir() {
+        return Err("Current path is not a folder".into());
+    }
+    let name = validate_entry_name(name)?;
+    let destination = parent.join(name);
+    if !destination.starts_with(root) {
+        return Err("Path escapes the instance folder".into());
+    }
+    tokio::fs::create_dir(&destination)
+        .await
+        .map_err(|error| format!("Could not create folder: {error}"))
+}
+
 async fn load_detail(instance_id: String) -> Result<DetailData, String> {
     let content = instance::get_content_items(&instance_id, None)
         .await
         .map_err(describe)?;
+    let modpack = instance::get_linked_modpack_info(&instance_id, None)
+        .await
+        .ok()
+        .flatten()
+        .map(LinkedModpackView::from);
     let worlds = worlds::get_instance_worlds(&instance_id)
         .await
         .unwrap_or_default();
@@ -4222,6 +5340,7 @@ async fn load_detail(instance_id: String) -> Result<DetailData, String> {
         content,
         worlds,
         logs,
+        modpack,
     })
 }
 
@@ -4755,11 +5874,179 @@ async fn detect_java() -> Result<Vec<JreChoice>, String> {
         .map_err(describe)
 }
 
+async fn list_hosted_servers() -> Result<Vec<HostedServerView>, String> {
+    hosting::list_hosted_servers(100)
+        .await
+        .map(|servers| {
+            servers.into_iter().map(HostedServerView::from).collect()
+        })
+        .map_err(describe)
+}
+
+async fn rename_hosted_server(
+    server_id: String,
+    name: String,
+) -> Result<(), String> {
+    hosting::rename_hosted_server(&server_id, &name)
+        .await
+        .map_err(describe)
+}
+
+async fn set_hosted_server_power(
+    server_id: String,
+    action: HostingPowerAction,
+) -> Result<(), String> {
+    hosting::set_hosted_server_power(&server_id, action)
+        .await
+        .map_err(describe)
+}
+
 async fn load_processes() -> Result<Vec<ProcessView>, String> {
     process::get_all()
         .await
         .map(|processes| processes.into_iter().map(ProcessView::from).collect())
         .map_err(describe)
+}
+
+fn process_exit_succeeded(message: &str) -> bool {
+    message
+        .rsplit_once("exit status:")
+        .is_some_and(|(_, status)| status.trim() == "0")
+}
+
+async fn analyze_exit(
+    instance_id: String,
+) -> Result<Option<CrashAnalysis>, String> {
+    let logs = logs::get_logs(&instance_id, Some(false))
+        .await
+        .map_err(describe)?;
+    let mut lines = Vec::new();
+    for log in logs.into_iter().take(3) {
+        if let Some(output) = log.output {
+            let content = output.into_inner();
+            lines.extend(
+                content
+                    .lines()
+                    .rev()
+                    .take(600)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev(),
+            );
+        }
+    }
+    let analysis = analyze_log_lines(&lines);
+    Ok((!analysis.causes.is_empty() || analysis.excerpt.is_some())
+        .then_some(analysis))
+}
+
+fn analyze_log_lines(lines: &[String]) -> CrashAnalysis {
+    let mut causes = Vec::new();
+    let push = |causes: &mut Vec<CrashCause>, cause: CrashCause| {
+        if !causes.contains(&cause) {
+            causes.push(cause);
+        }
+    };
+    for line in lines {
+        let line = line.to_lowercase();
+        if line.contains("outofmemoryerror")
+            || line.contains("java heap space")
+            || line.contains("gc overhead limit exceeded")
+        {
+            push(&mut causes, CrashCause::OutOfMemory);
+        }
+        if line.contains("unsupportedclassversionerror")
+            || line.contains("class file version")
+            || line.contains("requires java")
+        {
+            push(&mut causes, CrashCause::JavaVersion);
+        }
+        if line.contains("unrecognized vm option")
+            || line.contains("could not create the java virtual machine")
+            || line.contains("could not find or load main class")
+        {
+            push(&mut causes, CrashCause::JavaLaunch);
+        }
+        if line.contains("glfw error")
+            || line.contains("failed to create window")
+            || line.contains("pixel format")
+            || line.contains("opengl")
+            || line.contains("egl")
+        {
+            push(&mut causes, CrashCause::Graphics);
+        }
+        if line.contains("modresolutionexception")
+            || line.contains("incompatible mod set")
+            || line.contains("incompatiblemodsetexception")
+        {
+            push(&mut causes, CrashCause::ModResolution);
+        }
+        if line.contains("duplicatemodsfoundexception")
+            || line.contains("duplicate mods")
+        {
+            push(&mut causes, CrashCause::DuplicateMods);
+        }
+        if line.contains("mixinapplyerror")
+            || line.contains("injection failure")
+            || line.contains("mixin.transformer")
+            || line.contains("noclassdeffounderror")
+            || line.contains("classnotfoundexception")
+            || line.contains("nosuchmethoderror")
+        {
+            push(&mut causes, CrashCause::ModConflict);
+        }
+        if line.contains("unknownhostexception")
+            || line.contains("connection reset")
+            || line.contains("failed to download")
+            || line.contains("sockettimeout")
+        {
+            push(&mut causes, CrashCause::Network);
+        }
+        if line.contains("invalid session")
+            || line.contains("authentication servers")
+            || line.contains("failed to authenticate")
+        {
+            push(&mut causes, CrashCause::Authentication);
+        }
+        if line.contains("the game crashed whilst")
+            || line.contains("crash report")
+        {
+            push(&mut causes, CrashCause::CrashReport);
+        }
+    }
+
+    let mut excerpt_lines: Vec<&str> = lines
+        .iter()
+        .rev()
+        .filter(|line| {
+            let lower = line.to_lowercase();
+            lower.contains("exception")
+                || lower.contains("caused by:")
+                || lower.contains("error")
+                || lower.contains("crash")
+                || lower.contains("fatal")
+        })
+        .take(8)
+        .map(String::as_str)
+        .collect();
+    excerpt_lines.reverse();
+    let mut excerpt = excerpt_lines
+        .into_iter()
+        .map(|line| line.chars().take(300).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if excerpt.len() > 1600 {
+        excerpt = excerpt.chars().take(1600).collect();
+    }
+    if causes.is_empty() && !excerpt.is_empty() {
+        causes.push(CrashCause::Generic);
+    }
+
+    CrashAnalysis {
+        causes,
+        excerpt: (!excerpt.is_empty()).then_some(excerpt),
+    }
 }
 
 async fn kill_process(uuid: String) -> Result<(), String> {
@@ -5266,6 +6553,7 @@ fn apply_setting(
         }
         SettingChange::SetLocale(locale) => {
             settings.locale = locale.to_string();
+            crate::i18n::set_locale(locale);
         }
         SettingChange::ToggleTelemetry => {
             settings.telemetry = !settings.telemetry
@@ -5288,9 +6576,23 @@ fn apply_setting(
         SettingChange::ToggleSidebar => {
             settings.toggle_sidebar = !settings.toggle_sidebar
         }
+        SettingChange::ToggleReduceMotion => {
+            let enabled = !reduce_motion(&settings);
+            settings
+                .feature_flags
+                .insert(FeatureFlag::ReduceMotion, enabled);
+        }
     }
 
     Some(settings)
+}
+
+fn reduce_motion(settings: &Settings) -> bool {
+    settings
+        .feature_flags
+        .get(&FeatureFlag::ReduceMotion)
+        .copied()
+        .unwrap_or(false)
 }
 
 impl From<InstanceMetadata> for InstanceView {
@@ -5316,6 +6618,10 @@ impl From<InstanceMetadata> for InstanceView {
             .extra_launch_args
             .clone()
             .unwrap_or_default();
+        let quarantined = metadata.quarantined;
+        let install_stage =
+            metadata.instance.install_stage.as_str().to_string();
+        let update_channel = format!("{:?}", metadata.instance.update_channel);
         let instance = metadata.instance;
         let content_set = metadata.applied_content_set;
         Self {
@@ -5335,6 +6641,9 @@ impl From<InstanceMetadata> for InstanceView {
             launch_args,
             group_ids,
             shared,
+            quarantined,
+            install_stage,
+            update_channel,
         }
     }
 }
@@ -5386,11 +6695,132 @@ mod tests {
     use base64::Engine as _;
 
     use super::{
-        ProjectKind, ProjectView, auth_code_from_path, compose_avatar,
-        decode_data_icon, extract_invite_id, extract_login_code,
-        render_avatar_png,
+        CrashCause, InstanceView, ProjectKind, ProjectView, analyze_log_lines,
+        auth_code_from_path, compose_avatar, create_folder_in,
+        decode_data_icon, delete_entry, extract_invite_id, extract_login_code,
+        process_exit_succeeded, relative_file_path, rename_entry,
+        render_avatar_png, validate_entry_name,
     };
     use image::{Rgba, RgbaImage};
+
+    fn instance(name: &str, version: &str, loader: &str) -> InstanceView {
+        InstanceView {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            path: format!("/instances/{name}"),
+            icon_path: None,
+            last_played: None,
+            playtime_minutes: 0,
+            game_version: version.to_string(),
+            loader: loader.to_string(),
+            loader_version: None,
+            memory_mb: None,
+            java_path: None,
+            launch_args: Vec::new(),
+            group_ids: Vec::new(),
+            shared: None,
+            quarantined: false,
+            install_stage: "installed".to_string(),
+            update_channel: "Stable".to_string(),
+        }
+    }
+
+    #[test]
+    fn instance_search_matches_name_version_and_loader() {
+        let view = instance("Survival", "1.21.10", "Fabric");
+        assert!(view.matches_query(""));
+        assert!(view.matches_query("  survival "));
+        assert!(view.matches_query("1.21"));
+        assert!(view.matches_query("fabric"));
+        assert!(view.matches_query("ID-SURVIVAL"));
+        assert!(!view.matches_query("create"));
+    }
+
+    #[test]
+    fn file_paths_cannot_escape_the_instance() {
+        assert_eq!(
+            relative_file_path("mods/example.jar").unwrap(),
+            std::path::PathBuf::from("mods/example.jar")
+        );
+        assert!(relative_file_path("./config/../config/a.toml").is_err());
+        assert!(relative_file_path("../outside").is_err());
+        assert!(relative_file_path("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn file_names_cannot_change_directories() {
+        assert_eq!(validate_entry_name("mods").unwrap(), "mods");
+        assert_eq!(
+            validate_entry_name("  options.txt ").unwrap(),
+            "options.txt"
+        );
+        for invalid in ["", ".", "..", "a/b", "a\\b", "a\0b"] {
+            assert!(validate_entry_name(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn classifies_common_crash_logs() {
+        let lines = vec![
+            "java.lang.OutOfMemoryError: Java heap space".to_string(),
+            "java.lang.NoClassDefFoundError: net/example/Mod".to_string(),
+            "Incompatible mod set!".to_string(),
+            "Some unrelated line".to_string(),
+        ];
+        let analysis = analyze_log_lines(&lines);
+        assert!(analysis.causes.contains(&CrashCause::OutOfMemory));
+        assert!(analysis.causes.contains(&CrashCause::ModConflict));
+        assert!(analysis.causes.contains(&CrashCause::ModResolution));
+        assert!(
+            analysis
+                .excerpt
+                .as_deref()
+                .is_some_and(|excerpt| excerpt.contains("OutOfMemory"))
+        );
+    }
+
+    #[test]
+    fn exit_status_is_read_from_the_process_message() {
+        assert!(process_exit_succeeded("Exited with exit status: 0"));
+        assert!(!process_exit_succeeded("Exited with exit status: 1"));
+        assert!(!process_exit_succeeded("Exited with signal: 9 (SIGKILL)"));
+        assert!(!process_exit_succeeded("Exited process"));
+    }
+
+    #[tokio::test]
+    async fn file_actions_stay_inside_the_instance() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        tokio::fs::create_dir(root.join("mods")).await.unwrap();
+        tokio::fs::write(root.join("mods/a.jar"), b"jar")
+            .await
+            .unwrap();
+
+        create_folder_in(&root, root.clone(), "configs")
+            .await
+            .unwrap();
+        assert!(root.join("configs").is_dir());
+
+        rename_entry(&root, root.join("mods/a.jar"), "b.jar")
+            .await
+            .unwrap();
+        assert!(root.join("mods/b.jar").is_file());
+        assert!(!root.join("mods/a.jar").exists());
+
+        assert!(
+            rename_entry(&root, root.join("mods/b.jar"), "../escape")
+                .await
+                .is_err()
+        );
+        assert!(
+            create_folder_in(&root, root.clone(), "../escape")
+                .await
+                .is_err()
+        );
+        assert!(delete_entry(&root, root.join("mods/b.jar")).await.is_ok());
+        assert!(!root.join("mods/b.jar").exists());
+        assert!(delete_entry(&root, root.clone()).await.is_err());
+    }
 
     #[test]
     fn parses_a_v3_search_hit() {

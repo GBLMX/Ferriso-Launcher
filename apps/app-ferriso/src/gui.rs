@@ -13,18 +13,20 @@ use ferriso_gui::iced::{
     gradient::Linear,
     keyboard, mouse, time,
     widget::{
-        Space, button, column, container, image, mouse_area, progress_bar, row,
-        scrollable, text, text_input,
+        Space, Stack, button, column, container, image, mouse_area, pick_list,
+        progress_bar, row, scrollable, text, text_input,
     },
 };
 use ferriso_gui::{Message as GuiMessage, Renderer};
 use ferriso_keymap::Keymap;
-use theseus::data::Theme as AppTheme;
+use theseus::data::{FeatureFlag, Theme as AppTheme};
+use theseus::hosting::HostingPowerAction;
 use theseus::instance::{FAVORITES_GROUP_ID, InstanceGroup};
 
 use crate::app::{
-    ContentRow, DetailTab, DetailView, GroupForm, InstanceEditForm,
-    InstanceView, JobView, JreChoice, LibraryForm, LogView, Message, Page,
+    ContentRow, CrashCause, DetailTab, DetailView, GroupForm, HostedServerView,
+    HostingRename, InstanceEditForm, InstanceView, JobView, JreChoice,
+    LibraryForm, LibrarySort, LogView, Message, Page, ProcessExitView,
     ProcessView, ProjectKind, ProjectView, SettingChange, SkinTab,
     VersionPicker, ViewModel, WorldArt, WorldForm, WorldFormKind, WorldRow,
 };
@@ -104,6 +106,40 @@ const DARK: Palette = Palette {
     hero_a: rgba(24, 55, 78, 220),
     hero_b: rgba(24, 33, 50, 230),
     hero_c: rgba(17, 21, 33, 240),
+};
+
+const HIGH_CONTRAST: Palette = Palette {
+    bg_top: Color::from_rgb8(0, 0, 0),
+    bg_mid: Color::from_rgb8(0, 0, 0),
+    bg_bottom: Color::from_rgb8(0, 0, 0),
+    border: Color::from_rgb8(255, 255, 255),
+    border_strong: Color::from_rgb8(255, 255, 255),
+    accent: Color::from_rgb8(255, 221, 0),
+    accent_cyan: Color::from_rgb8(0, 229, 255),
+    text: Color::from_rgb8(255, 255, 255),
+    muted: Color::from_rgb8(220, 220, 220),
+    error: Color::from_rgb8(255, 80, 80),
+    warning: Color::from_rgb8(255, 221, 0),
+    ink: Color::from_rgb8(0, 0, 0),
+    shadow: rgba(0, 0, 0, 220),
+    light: false,
+    panel_a: Color::from_rgb8(0, 0, 0),
+    panel_b: Color::from_rgb8(10, 10, 10),
+    surface_a: Color::from_rgb8(0, 0, 0),
+    surface_b: Color::from_rgb8(12, 12, 12),
+    card_a: Color::from_rgb8(0, 0, 0),
+    card_b: Color::from_rgb8(15, 15, 15),
+    stat_a: Color::from_rgb8(0, 0, 0),
+    stat_b: Color::from_rgb8(10, 10, 10),
+    row_selected_a: Color::from_rgb8(40, 40, 0),
+    row_selected_b: Color::from_rgb8(20, 20, 0),
+    input_bg: Color::from_rgb8(0, 0, 0),
+    input_focus: Color::from_rgb8(20, 20, 20),
+    danger_a: Color::from_rgb8(60, 0, 0),
+    danger_b: Color::from_rgb8(30, 0, 0),
+    hero_a: Color::from_rgb8(0, 0, 0),
+    hero_b: Color::from_rgb8(15, 15, 15),
+    hero_c: Color::from_rgb8(0, 0, 0),
 };
 
 const LIGHT: Palette = Palette {
@@ -397,6 +433,7 @@ fn palette_for(theme: &str, system_light: bool) -> Palette {
         "teal" => TEAL,
         "crimson" => CRIMSON,
         "emerald" => EMERALD,
+        "high-contrast" => HIGH_CONTRAST,
         "system" if system_light => LIGHT,
         _ => DARK,
     }
@@ -568,6 +605,7 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
                 .unwrap_or("dark"),
             view.system_light,
         );
+        crate::accessibility::publish(view);
         let sidebar = sidebar(view);
         let main = column![top_bar(view), content(view)]
             .spacing(14)
@@ -575,7 +613,7 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
             .height(Length::Fill);
         let backdrop = ambient_background(view.phase);
 
-        container(row![sidebar, main].spacing(14))
+        let shell = container(row![sidebar, main].spacing(14))
             .width(Length::Fill)
             .height(Length::Fill)
             .padding(14)
@@ -583,17 +621,48 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
                 background: Some(backdrop),
                 text_color: Some(fg()),
                 ..Default::default()
-            })
-            .into()
+            });
+        if let Some(exit) = &view.exit {
+            let dialog = container(exit_dialog(exit))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .padding(40)
+                .style(modal_backdrop_style);
+            Stack::with_children([shell.into(), dialog.into()])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            shell.into()
+        }
     }
 
-    fn subscription(&self, _view: &ViewModel) -> iced::Subscription<Msg> {
-        let keys = keyboard::listen().with(self.keymap.clone()).filter_map(
-            |(keymap, event)| {
+    fn subscription(&self, view: &ViewModel) -> iced::Subscription<Msg> {
+        let exit_open = view.exit.is_some();
+        let keys = keyboard::listen()
+            .with(self.keymap.clone())
+            .with(exit_open)
+            .filter_map(|(exit_open, (keymap, event))| {
                 let keyboard::Event::KeyPressed { key, modifiers, .. } = event
                 else {
                     return None;
                 };
+                if exit_open
+                    && matches!(
+                        &key,
+                        keyboard::Key::Named(keyboard::key::Named::Escape)
+                    )
+                {
+                    return Some(Msg::User(Message::DismissExit));
+                }
+                if modifiers.contains(keyboard::Modifiers::CTRL)
+                    && let keyboard::Key::Character(character) = &key
+                    && character.as_str() == "7"
+                {
+                    return Some(Msg::User(Message::Navigate(Page::Hosting)));
+                }
                 let chord = ferriso_gui::keymap::chord(&key, modifiers)?;
                 match keymap.resolve(&chord).copied()? {
                     Shortcut::Home => {
@@ -617,8 +686,7 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
                     Shortcut::Refresh => Some(Msg::User(Message::Refresh)),
                     Shortcut::Quit => Some(Msg::Closed),
                 }
-            },
-        );
+            });
 
         let jobs = time::every(Duration::from_secs(1))
             .map(|_| Msg::User(Message::PollJobs));
@@ -629,15 +697,45 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
 
         let updates = time::every(Duration::from_secs(300))
             .map(|_| Msg::User(Message::CheckUpdates));
+        let hosting =
+            if view.page == Page::Hosting && view.modrinth_account.is_some() {
+                time::every(Duration::from_secs(60))
+                    .map(|_| Msg::User(Message::HostingRefresh))
+            } else {
+                iced::Subscription::none()
+            };
         let system = iced::system::theme_changes().map(|mode| {
             Msg::User(Message::SystemThemeChanged(
                 mode == iced::theme::Mode::Light,
             ))
         });
+        let accessibility =
+            time::every(Duration::from_millis(120)).map(|_| Msg::Local(()));
 
         iced::Subscription::batch([
-            keys, jobs, processes, ambience, updates, system,
+            keys,
+            jobs,
+            processes,
+            ambience,
+            updates,
+            hosting,
+            system,
+            accessibility,
         ])
+    }
+
+    fn update(&mut self, _local: (), _view: &ViewModel) -> iced::Task<Msg> {
+        let messages = crate::accessibility::drain_messages();
+
+        if messages.is_empty() {
+            iced::Task::none()
+        } else {
+            iced::Task::batch(
+                messages
+                    .into_iter()
+                    .map(|message| iced::Task::done(Msg::User(message))),
+            )
+        }
     }
 
     fn on_snapshot_task(&mut self, _view: &ViewModel) -> iced::Task<Msg> {
@@ -778,7 +876,7 @@ fn sidebar(view: &ViewModel) -> Element<'_, Msg> {
             ]
             .spacing(9)
             .align_y(Alignment::Center),
-            text(t("Ctrl+1…6 · Ctrl+R · Ctrl+Q"))
+            text(t("Ctrl+1…7 · Ctrl+R · Ctrl+Q"))
                 .size(9)
                 .color(muted_c()),
             text(t("Unofficial Modrinth fork"))
@@ -871,6 +969,150 @@ fn top_bar(view: &ViewModel) -> Element<'_, Msg> {
     .into()
 }
 
+fn exit_dialog(exit: &ProcessExitView) -> Element<'_, Msg> {
+    let title = if exit.success {
+        t("Game closed")
+    } else {
+        t("Game crashed")
+    };
+    let mut body = column![
+        row![
+            text(title).size(20).color(if exit.success {
+                fg()
+            } else {
+                danger_c()
+            }),
+            Space::new().width(Length::Fill),
+            text(&exit.instance_name).size(11).color(muted_c()),
+        ]
+        .align_y(Alignment::Center),
+        text(&exit.detail).size(11).color(muted_c()),
+    ]
+    .spacing(6);
+
+    if !exit.success {
+        body = body.push(Space::new().height(4));
+        if exit.analyzing {
+            body = body.push(
+                text(t("Analyzing the latest logs…"))
+                    .size(11)
+                    .color(accent_c()),
+            );
+        } else if let Some(error) = &exit.analysis_error {
+            body = body.push(text(error).size(11).color(warning_c()));
+        } else if let Some(analysis) = &exit.analysis {
+            body =
+                body.push(text(t("What likely happened")).size(11).color(fg()));
+            for cause in &analysis.causes {
+                let (label, advice) = crash_cause(cause);
+                body = body.push(
+                    container(
+                        column![
+                            text(t(label)).size(11).color(warning_c()),
+                            text(t(advice)).size(10).color(muted_c()),
+                        ]
+                        .spacing(3),
+                    )
+                    .padding(9)
+                    .width(Length::Fill)
+                    .style(surface_style),
+                );
+            }
+            if let Some(excerpt) = &analysis.excerpt {
+                body = body.push(
+                    column![
+                        text(t("Log excerpt")).size(10).color(fg()),
+                        scrollable(
+                            text(excerpt)
+                                .size(9)
+                                .color(muted_c())
+                                .font(iced::Font::MONOSPACE)
+                        )
+                        .height(Length::Fixed(150.0)),
+                    ]
+                    .spacing(4),
+                );
+            }
+        } else {
+            body = body.push(
+                text(t("No crash report found")).size(11).color(muted_c()),
+            );
+        }
+    }
+
+    body = body.push(
+        row![
+            Space::new().width(Length::Fill),
+            button(text(t("Close")).size(10).color(ink_c()))
+                .padding([6, 14])
+                .on_press(Msg::User(Message::DismissExit))
+                .style(primary_style),
+        ]
+        .align_y(Alignment::Center),
+    );
+
+    container(body)
+        .width(Length::Fixed(720.0))
+        .max_height(560.0)
+        .padding(20)
+        .style(card_style)
+        .into()
+}
+
+fn crash_cause(cause: &CrashCause) -> (&'static str, &'static str) {
+    match cause {
+        CrashCause::OutOfMemory => (
+            "Out of memory",
+            "Increase the instance memory or reduce render distance and mods.",
+        ),
+        CrashCause::JavaVersion => (
+            "Wrong Java version",
+            "Install the Java version this Minecraft version expects.",
+        ),
+        CrashCause::JavaLaunch => (
+            "Java could not start",
+            "Check the selected Java path and JVM arguments.",
+        ),
+        CrashCause::Graphics => (
+            "Graphics or window failure",
+            "Try updating GPU drivers or disable advanced rendering.",
+        ),
+        CrashCause::ModResolution => (
+            "Mod dependency conflict",
+            "Check that all required mods and versions are installed.",
+        ),
+        CrashCause::DuplicateMods => {
+            ("Duplicate mods", "Remove duplicate copies of the same mod.")
+        }
+        CrashCause::ModConflict => (
+            "Mod incompatibility",
+            "Disable recently added mods and retry.",
+        ),
+        CrashCause::Network => {
+            ("Network failure", "Check your connection and retry.")
+        }
+        CrashCause::Authentication => (
+            "Login or session failure",
+            "Sign out and sign back in to your account.",
+        ),
+        CrashCause::CrashReport => (
+            "Minecraft crash report",
+            "Open the latest crash report for the full stack trace.",
+        ),
+        CrashCause::Generic => (
+            "Unexpected exit",
+            "Review the log excerpt below and the latest crash report.",
+        ),
+    }
+}
+
+fn modal_backdrop_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(rgba(0, 0, 0, 190))),
+        ..Default::default()
+    }
+}
+
 fn content(view: &ViewModel) -> Element<'_, Msg> {
     if !view.booted {
         return container(loading_card(&view.status))
@@ -889,6 +1131,7 @@ fn content(view: &ViewModel) -> Element<'_, Msg> {
         Page::Instance => instance_page(view),
         Page::Account => account(view),
         Page::Skins => skins(view),
+        Page::Hosting => hosting(view),
         Page::Settings => settings(view),
     };
 
@@ -959,12 +1202,34 @@ fn checklist_item<'a>(
     .into()
 }
 
+fn running_process<'a>(
+    view: &'a ViewModel,
+    instance_id: &str,
+) -> Option<&'a ProcessView> {
+    view.processes
+        .iter()
+        .find(|process| process.instance_id == instance_id)
+}
+
 fn home(view: &ViewModel) -> Element<'_, Msg> {
     let mut body = column![].spacing(14);
 
     if let Some(instance) = view.instances.first() {
         let launch: Element<'_, Msg> =
-            if view.launching.as_deref() == Some(instance.id.as_str()) {
+            if let Some(process) = running_process(view, &instance.id) {
+                row![
+                    text(t("Running")).size(11).color(accent_c()),
+                    button(text(t("Stop")).size(12).color(danger_c()))
+                        .padding([9, 16])
+                        .on_press(Msg::User(Message::KillProcess(
+                            process.uuid.clone()
+                        )))
+                        .style(ghost_style),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into()
+            } else if view.launching.as_deref() == Some(instance.id.as_str()) {
                 text(t("Launching…")).size(12).color(warning_c()).into()
             } else {
                 button(text(t("Launch now")).size(12).color(ink_c()))
@@ -1158,7 +1423,20 @@ fn home_instance_row<'a>(
     view: &'a ViewModel,
 ) -> Element<'a, Msg> {
     let launching = view.launching.as_deref() == Some(instance.id.as_str());
-    let launch: Element<'a, Msg> = if launching {
+    let launch: Element<'a, Msg> = if let Some(process) =
+        running_process(view, &instance.id)
+    {
+        row![
+            text(t("Running")).size(10).color(accent_c()),
+            button(text(t("Stop")).size(10).color(danger_c()))
+                .padding([6, 10])
+                .on_press(Msg::User(Message::KillProcess(process.uuid.clone())))
+                .style(ghost_style),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+    } else if launching {
         text(t("Launching…")).size(11).color(warning_c()).into()
     } else {
         button(text(t("Launch")).size(11).color(ink_c()))
@@ -1265,7 +1543,36 @@ fn library(view: &ViewModel) -> Element<'_, Msg> {
     .spacing(10)
     .align_y(Alignment::Center);
 
-    let mut body = column![header].spacing(10);
+    let clear: Element<'_, Msg> = if view.library_query.is_empty() {
+        Space::new().width(0).into()
+    } else {
+        button(text(t("Clear")).size(11).color(muted_c()))
+            .padding([8, 12])
+            .on_press(Msg::User(Message::LibraryQueryChanged(String::new())))
+            .style(ghost_style)
+            .into()
+    };
+    let controls = row![
+        text_input(t("Search instances…"), &view.library_query)
+            .size(11)
+            .padding(8)
+            .style(text_input_style)
+            .width(Length::Fill)
+            .on_input(|value| Msg::User(Message::LibraryQueryChanged(value))),
+        button(
+            text(format!("{}: {}", t("Sort"), t(view.library_sort.label())))
+                .size(11)
+                .color(fg())
+        )
+        .padding([8, 12])
+        .on_press(Msg::User(Message::CycleLibrarySort))
+        .style(ghost_style),
+        clear,
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    let mut body = column![header, controls].spacing(10);
     if view.create.open {
         body = body.push(create_card(view));
     }
@@ -1279,7 +1586,8 @@ fn library(view: &ViewModel) -> Element<'_, Msg> {
         body = body.push(groups_card(view));
     }
 
-    let shown: Vec<&InstanceView> = view
+    let query = view.library_query.trim().to_lowercase();
+    let mut shown: Vec<&InstanceView> = view
         .instances
         .iter()
         .filter(|instance| {
@@ -1287,18 +1595,43 @@ fn library(view: &ViewModel) -> Element<'_, Msg> {
                 instance.group_ids.iter().any(|id| id == group)
             })
         })
+        .filter(|instance| instance.matches_query(&query))
         .collect();
 
+    shown.sort_by(|left, right| match view.library_sort {
+        LibrarySort::Recent => {
+            right.last_played.cmp(&left.last_played).then_with(|| {
+                left.name.to_lowercase().cmp(&right.name.to_lowercase())
+            })
+        }
+        LibrarySort::Name => {
+            left.name.to_lowercase().cmp(&right.name.to_lowercase())
+        }
+        LibrarySort::Playtime => right
+            .playtime_minutes
+            .cmp(&left.playtime_minutes)
+            .then_with(|| {
+                left.name.to_lowercase().cmp(&right.name.to_lowercase())
+            }),
+    });
+
     if view.instances.is_empty() {
+        let (title, subtitle) = if query.is_empty() {
+            (
+                "No instances yet",
+                "Create a vanilla or modded instance to start playing.",
+            )
+        } else {
+            (
+                "No matching instances",
+                "Try a different name, version, or loader.",
+            )
+        };
         body = body.push(
             container(
                 column![
-                    text(t("No instances yet")).size(22).color(fg()),
-                    text(
-                        "Create a vanilla or modded instance to start playing."
-                    )
-                    .size(12)
-                    .color(muted_c()),
+                    text(t(title)).size(22).color(fg()),
+                    text(t(subtitle)).size(12).color(muted_c()),
                 ]
                 .spacing(6),
             )
@@ -1306,15 +1639,22 @@ fn library(view: &ViewModel) -> Element<'_, Msg> {
             .style(hero_style(view.phase)),
         );
     } else if shown.is_empty() {
+        let (title, subtitle) = if query.is_empty() {
+            (
+                "No instances in this group",
+                "Assign instances to the group from their Edit card.",
+            )
+        } else {
+            (
+                "No matching instances",
+                "Try a different name, version, or loader.",
+            )
+        };
         body = body.push(
             container(
                 column![
-                    text(t("No instances in this group")).size(18).color(fg()),
-                    text(t(
-                        "Assign instances to the group from their Edit card."
-                    ))
-                    .size(11)
-                    .color(muted_c()),
+                    text(t(title)).size(18).color(fg()),
+                    text(t(subtitle)).size(11).color(muted_c()),
                 ]
                 .spacing(4),
             )
@@ -1493,8 +1833,27 @@ fn instance_row<'a>(
     let selected = view.selected.as_deref() == Some(instance.id.as_str());
     let launching = view.launching.as_deref() == Some(instance.id.as_str());
 
+    let status = if instance.quarantined {
+        Some((t("Quarantined"), danger_c()))
+    } else if instance.is_installing() {
+        Some((t("Installing"), warning_c()))
+    } else if instance.update_channel != "Stable" {
+        Some((t("Beta channel"), accent_c()))
+    } else {
+        None
+    };
+    let mut title = row![text(&instance.name).size(15).color(fg())]
+        .spacing(7)
+        .align_y(Alignment::Center);
+    if let Some((label, color)) = status {
+        title = title.push(
+            container(text(label).size(8).color(color))
+                .padding([2, 6])
+                .style(glass_chip_style),
+        );
+    }
     let details = column![
-        text(&instance.name).size(15).color(fg()),
+        title,
         text(format!(
             "{} · {} {}",
             instance.game_version,
@@ -1519,8 +1878,36 @@ fn instance_row<'a>(
     ]
     .spacing(3);
 
-    let action: Element<'_, Msg> = if launching {
+    let running = view
+        .processes
+        .iter()
+        .find(|process| process.instance_id == instance.id);
+    let action: Element<'_, Msg> = if let Some(process) = running {
+        row![
+            text(t("Running")).size(10).color(accent_c()),
+            button(text(t("Stop")).size(10).color(danger_c()))
+                .padding([6, 10])
+                .on_press(Msg::User(Message::KillProcess(process.uuid.clone())))
+                .style(ghost_style),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+    } else if launching {
         text(t("Launching…")).size(11).color(warning_c()).into()
+    } else if !instance.launchable() {
+        button(
+            text(if instance.quarantined {
+                t("Blocked")
+            } else {
+                t("Installing…")
+            })
+            .size(11)
+            .color(muted_c()),
+        )
+        .padding([7, 14])
+        .style(ghost_style)
+        .into()
     } else {
         button(text(t("Launch")).size(11).color(ink_c()))
             .padding([7, 14])
@@ -2450,6 +2837,15 @@ fn instance_page(view: &ViewModel) -> Element<'_, Msg> {
         .into()
     } else if view.launching.as_deref() == Some(instance.id.as_str()) {
         text(t("Launching…")).size(12).color(warning_c()).into()
+    } else if !instance.launchable() {
+        text(if instance.quarantined {
+            t("Quarantined")
+        } else {
+            t("Installing…")
+        })
+        .size(11)
+        .color(warning_c())
+        .into()
     } else {
         button(text(t("Launch")).size(12).color(ink_c()))
             .padding([7, 14])
@@ -2543,8 +2939,9 @@ fn instance_page(view: &ViewModel) -> Element<'_, Msg> {
         body = body.push(match detail.tab {
             DetailTab::Overview => detail_overview(detail, instance, running),
             DetailTab::Content => detail_content(detail),
+            DetailTab::Files => detail_files(detail),
             DetailTab::Worlds => detail_worlds(detail),
-            DetailTab::Logs => detail_logs(detail),
+            DetailTab::Logs => detail_logs(view, detail),
         });
     }
 
@@ -2556,61 +2953,354 @@ fn detail_overview<'a>(
     instance: &'a InstanceView,
     running: Option<&'a ProcessView>,
 ) -> Element<'a, Msg> {
-    container(
-        column![
-            text(t("Overview")).size(16).color(fg()),
-            setting_row("Instance ID", &instance.id),
-            setting_row(
-                "Loader version",
-                instance.loader_version.as_deref().unwrap_or("—")
-            ),
-            setting_row(
-                "Last played",
-                instance.last_played.as_deref().unwrap_or("Never")
-            ),
-            setting_row(
-                "Playtime",
-                &format!("{} {}", instance.playtime_minutes, t("minutes"))
-            ),
-            setting_row(
-                "Runtime",
-                &running
-                    .map(|process| format!(
+    let mut body = column![
+        text(t("Overview")).size(16).color(fg()),
+        setting_row("Instance ID", &instance.id),
+        setting_row(
+            "Loader version",
+            instance.loader_version.as_deref().unwrap_or("—")
+        ),
+        setting_row(
+            "Last played",
+            instance.last_played.as_deref().unwrap_or("Never")
+        ),
+        setting_row(
+            "Playtime",
+            &format!("{} {}", instance.playtime_minutes, t("minutes"))
+        ),
+        setting_row(
+            "Runtime",
+            &running
+                .map(|process| format!(
+                    "{} {}",
+                    t("Running since"),
+                    process.started_at
+                ))
+                .unwrap_or_else(|| "Stopped".into())
+        ),
+        setting_row(
+            "Memory",
+            &instance
+                .memory_mb
+                .map(|value| format!("{value} MB"))
+                .unwrap_or_else(|| "Global default".into())
+        ),
+        setting_row(
+            "Java",
+            instance.java_path.as_deref().unwrap_or("Auto-detected")
+        ),
+        setting_row(
+            "Content",
+            &format!("{} {}", detail.content.len(), t("files"))
+        ),
+        setting_row(
+            "Worlds",
+            &format!("{} {}", detail.worlds.len(), t("worlds"))
+        ),
+        setting_row(
+            "Logs",
+            &format!("{} {}", detail.logs.len(), t("log files"))
+        ),
+    ]
+    .spacing(8);
+    if let Some(modpack) = &detail.modpack {
+        let mut actions = row![].spacing(6);
+        if modpack.has_update {
+            actions = actions.push(
+                button(
+                    text(format!(
                         "{} {}",
-                        t("Running since"),
-                        process.started_at
+                        t("Update modpack"),
+                        modpack.update_version.as_deref().unwrap_or("")
                     ))
-                    .unwrap_or_else(|| "Stopped".into())
-            ),
-            setting_row(
-                "Memory",
-                &instance
-                    .memory_mb
-                    .map(|value| format!("{value} MB"))
-                    .unwrap_or_else(|| "Global default".into())
-            ),
-            setting_row(
-                "Java",
-                instance.java_path.as_deref().unwrap_or("Auto-detected")
-            ),
-            setting_row(
-                "Content",
-                &format!("{} {}", detail.content.len(), t("files"))
-            ),
-            setting_row(
-                "Worlds",
-                &format!("{} {}", detail.worlds.len(), t("worlds"))
-            ),
-            setting_row(
-                "Logs",
-                &format!("{} {}", detail.logs.len(), t("log files"))
-            ),
+                    .size(9)
+                    .color(ink_c()),
+                )
+                .padding([4, 8])
+                .on_press(Msg::User(Message::UpdateModpack))
+                .style(primary_style),
+            );
+        }
+        actions = actions.push(
+            button(text(t("Repair files")).size(9).color(fg()))
+                .padding([4, 8])
+                .on_press(Msg::User(Message::RepairInstance))
+                .style(ghost_style),
+        );
+        body = body.push(
+            container(
+                column![
+                    text(t("Linked modpack")).size(10).color(accent_c()),
+                    row![
+                        text(&modpack.title).size(13).color(fg()),
+                        Space::new().width(Length::Fill),
+                        button(
+                            text(t("Open project")).size(9).color(accent_c())
+                        )
+                        .padding([2, 6])
+                        .on_press(Msg::User(Message::OpenProject(
+                            modpack.project_id.clone(),
+                        )))
+                        .style(ghost_style),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                    text(format!(
+                        "{}: {}",
+                        t("Installed version"),
+                        modpack.version.as_deref().unwrap_or("—")
+                    ))
+                    .size(9)
+                    .color(muted_c()),
+                    actions,
+                ]
+                .spacing(4),
+            )
+            .padding(9)
+            .style(surface_style),
+        );
+    }
+    container(body).padding(16).style(card_style).into()
+}
+
+fn detail_files(detail: &DetailView) -> Element<'_, Msg> {
+    let Some(files) = &detail.files else {
+        return column![
+            text(t("Files")).size(16).color(fg()),
+            text(t("Loading files…")).size(11).color(muted_c()),
         ]
-        .spacing(8),
+        .spacing(8)
+        .into();
+    };
+    let location = if files.path.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", files.path)
+    };
+    let mut body = column![
+        row![
+            text(t("Files")).size(16).color(fg()),
+            text(location.clone()).size(10).color(muted_c()),
+            Space::new().width(Length::Fill),
+            button(text(t("New folder")).size(10).color(accent_c()))
+                .padding([4, 8])
+                .on_press(Msg::User(Message::FileNewFolder))
+                .style(ghost_style),
+            button(text(t("Refresh")).size(10).color(fg()))
+                .padding([4, 8])
+                .on_press(Msg::User(Message::FilesRefresh))
+                .style(ghost_style),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(8);
+
+    if let Some(preview) = &files.preview {
+        body = body.push(
+            container(
+                column![
+                    row![
+                        text(&preview.name).size(12).color(fg()),
+                        if preview.truncated {
+                            Element::from(
+                                text(t("truncated")).size(9).color(warning_c()),
+                            )
+                        } else {
+                            Element::from(Space::new())
+                        },
+                        Space::new().width(Length::Fill),
+                        button(text(t("Close")).size(9).color(muted_c()))
+                            .padding([3, 7])
+                            .on_press(Msg::User(Message::FilePreviewClose))
+                            .style(ghost_style),
+                    ]
+                    .spacing(7)
+                    .align_y(Alignment::Center),
+                    scrollable(
+                        text(&preview.content)
+                            .size(9)
+                            .color(muted_c())
+                            .font(iced::Font::MONOSPACE)
+                    )
+                    .height(Length::Fixed(260.0)),
+                ]
+                .spacing(6),
+            )
+            .padding(10)
+            .style(surface_style),
+        );
+    }
+
+    if let Some(rename) = &files.rename {
+        body = body.push(file_form(
+            t("Rename"),
+            &rename.name,
+            Message::FileRenameChanged,
+            Message::FileRenameSave,
+        ));
+    }
+    if let Some(name) = &files.new_folder {
+        body = body.push(file_form(
+            t("New folder name"),
+            name,
+            Message::FileNewFolderChanged,
+            Message::FileNewFolderSave,
+        ));
+    }
+    if let Some(delete) = &files.delete {
+        body = body.push(
+            container(
+                row![
+                    text(format!("{}{}?", t("Delete "), delete.name))
+                        .size(11)
+                        .color(danger_c()),
+                    Space::new().width(Length::Fill),
+                    button(text(t("Delete")).size(9).color(ink_c()))
+                        .padding([4, 8])
+                        .on_press(Msg::User(Message::FileDeleteConfirm))
+                        .style(danger_button_style),
+                    button(text(t("Cancel")).size(9).color(muted_c()))
+                        .padding([4, 8])
+                        .on_press(Msg::User(Message::FileDeleteCancel))
+                        .style(ghost_style),
+                ]
+                .spacing(7)
+                .align_y(Alignment::Center),
+            )
+            .padding(9)
+            .style(danger_style),
+        );
+    }
+
+    if files.loading {
+        body = body.push(text(t("Loading files…")).size(11).color(muted_c()));
+    } else if let Some(error) = &files.error {
+        body = body.push(text(error).size(11).color(danger_c()));
+    } else {
+        let mut list = column![].spacing(3);
+        if !files.path.is_empty() {
+            list = list.push(
+                button(
+                    row![text(t("..")).size(11).color(accent_c()),]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding(7)
+                .on_press(Msg::User(Message::FileNavigate("..".into())))
+                .style(row_style(false)),
+            );
+        }
+        for entry in &files.entries {
+            let name = entry.name.clone();
+            let label = if entry.is_dir {
+                format!("▸  {name}")
+            } else {
+                format!("·  {name}")
+            };
+            let meta = if entry.is_dir {
+                t("folder").to_string()
+            } else {
+                human_bytes(entry.size)
+            };
+            let action = if entry.is_dir {
+                Message::FileNavigate(name)
+            } else {
+                Message::FilePreviewOpen(name)
+            };
+            let main = button(
+                row![
+                    text(label).size(11).color(if entry.is_dir {
+                        accent_c()
+                    } else {
+                        fg()
+                    }),
+                    Space::new().width(Length::Fill),
+                    text(meta).size(9).color(muted_c()),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding(7)
+            .on_press(Msg::User(action))
+            .style(row_style(false));
+            list = list.push(
+                row![
+                    main,
+                    button(text(t("Rename")).size(8).color(muted_c()))
+                        .padding([3, 6])
+                        .on_press(Msg::User(Message::FileAskRename(
+                            entry.name.clone(),
+                        )))
+                        .style(ghost_style),
+                    button(text(t("Delete")).size(8).color(danger_c()))
+                        .padding([3, 6])
+                        .on_press(Msg::User(Message::FileAskDelete(
+                            entry.name.clone(),
+                        )))
+                        .style(ghost_style),
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center),
+            );
+        }
+        if files.entries.is_empty() {
+            list = list.push(
+                text(t("This folder is empty.")).size(11).color(muted_c()),
+            );
+        }
+        body = body.push(scrollable(list).height(Length::Fill));
+    }
+
+    container(body)
+        .padding(16)
+        .height(Length::Fill)
+        .style(card_style)
+        .into()
+}
+
+fn file_form<'a>(
+    label: &'a str,
+    value: &'a str,
+    on_input: fn(String) -> Message,
+    on_submit: Message,
+) -> Element<'a, Msg> {
+    container(
+        row![
+            text_input(label, value)
+                .size(11)
+                .padding(7)
+                .on_input(move |value| Msg::User(on_input(value)))
+                .on_submit(Msg::User(on_submit.clone()))
+                .style(text_input_style)
+                .width(Length::Fill),
+            button(text(t("Save")).size(9).color(ink_c()))
+                .padding([5, 9])
+                .on_press(Msg::User(on_submit))
+                .style(primary_style),
+            button(text(t("Cancel")).size(9).color(muted_c()))
+                .padding([5, 9])
+                .on_press(Msg::User(Message::FileFormCancel))
+                .style(ghost_style),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
-    .padding(16)
-    .style(card_style)
+    .padding(9)
+    .style(surface_style)
     .into()
+}
+
+fn human_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn detail_content(detail: &DetailView) -> Element<'_, Msg> {
@@ -3360,7 +4050,10 @@ fn image_art(handle: image::Handle, size: f32) -> Element<'static, Msg> {
         .into()
 }
 
-fn detail_logs(detail: &DetailView) -> Element<'_, Msg> {
+fn detail_logs<'a>(
+    view: &'a ViewModel,
+    detail: &'a DetailView,
+) -> Element<'a, Msg> {
     let header = row![
         text(t("Logs")).size(16).color(fg()),
         text(format!("{} {}", detail.logs.len(), t("log files")))
@@ -3381,6 +4074,41 @@ fn detail_logs(detail: &DetailView) -> Element<'_, Msg> {
     .align_y(Alignment::Center);
 
     let mut body = column![header].spacing(8);
+    if !view.live_log.is_empty() {
+        body = body.push(
+            container(
+                column![
+                    row![
+                        text(t("Live console")).size(13).color(fg()),
+                        text(format!(
+                            "{} · {}",
+                            t("running"),
+                            view.live_log_instance.as_deref().unwrap_or("")
+                        ))
+                        .size(9)
+                        .color(accent_c()),
+                        Space::new().width(Length::Fill),
+                        button(text(t("Clear")).size(9).color(muted_c()))
+                            .padding([3, 7])
+                            .on_press(Msg::User(Message::ClearLiveLog))
+                            .style(ghost_style),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                    scrollable(
+                        text(&view.live_log)
+                            .size(9)
+                            .color(muted_c())
+                            .font(iced::Font::MONOSPACE)
+                    )
+                    .height(Length::Fixed(190.0)),
+                ]
+                .spacing(6),
+            )
+            .padding(10)
+            .style(surface_style),
+        );
+    }
     if let Some(view) = &detail.log_view {
         body = body.push(log_view_card(view));
     }
@@ -4144,6 +4872,7 @@ fn theme_buttons(current: AppTheme) -> Vec<Element<'static, Msg>> {
         AppTheme::Teal,
         AppTheme::Crimson,
         AppTheme::Emerald,
+        AppTheme::HighContrast,
     ]
     .into_iter()
     .map(|theme| {
@@ -4188,10 +4917,10 @@ fn theme_buttons(current: AppTheme) -> Vec<Element<'static, Msg>> {
             },
             ..Default::default()
         });
-        let label = if theme.as_str() == "system" {
-            "Sync with system"
-        } else {
-            theme.as_str()
+        let label = match theme.as_str() {
+            "system" => "Sync with system",
+            "high-contrast" => "High contrast",
+            other => other,
         };
         button(
             column![
@@ -4240,37 +4969,308 @@ fn theme_grid(current: AppTheme) -> Element<'static, Msg> {
 }
 
 fn language_row(locale: &str) -> Element<'static, Msg> {
-    let locale = locale.to_ascii_lowercase();
-    let english = locale.starts_with("en");
-    let chinese = locale.starts_with("zh");
+    let selected =
+        i18n::LOCALES
+            .iter()
+            .copied()
+            .find(|entry| entry.code.eq_ignore_ascii_case(locale))
+            .or_else(|| {
+                let language = locale
+                    .split('-')
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                i18n::LOCALES.iter().copied().find(|entry| {
+                    entry.code.split('-').next().is_some_and(|code| {
+                        code.eq_ignore_ascii_case(&language)
+                    })
+                })
+            })
+            .unwrap_or(i18n::LOCALES[0]);
 
     row![
         text(t("Language")).size(13).color(muted_c()),
         Space::new().width(Length::Fill),
-        button(text("English").size(11).color(if english {
-            accent_c()
-        } else {
-            muted_c()
-        }))
-        .padding([5, 10])
-        .on_press(Msg::User(Message::SettingChanged(
-            SettingChange::SetLocale("en-US",)
-        )))
-        .style(nav_style(english, 0.0)),
-        button(text("简体中文").size(11).color(if chinese {
-            accent_c()
-        } else {
-            muted_c()
-        }))
-        .padding([5, 10])
-        .on_press(Msg::User(Message::SettingChanged(
-            SettingChange::SetLocale("zh-CN",)
-        )))
-        .style(nav_style(chinese, 0.0)),
+        pick_list(&i18n::LOCALES[..], Some(selected), |entry| {
+            Msg::User(Message::SettingChanged(SettingChange::SetLocale(
+                entry.code,
+            )))
+        })
+        .text_size(11)
+        .padding([6, 10])
+        .width(Length::Fixed(230.0)),
     ]
     .spacing(8)
     .align_y(Alignment::Center)
     .into()
+}
+
+fn hosting(view: &ViewModel) -> Element<'_, Msg> {
+    let hosting = &view.hosting;
+    let header = row![
+        text(t("Hosting")).size(24).color(fg()),
+        Space::new().width(Length::Fill),
+        button(text(t("Hosting dashboard")).size(10).color(accent_c()))
+            .padding([5, 9])
+            .on_press(Msg::User(Message::OpenUrl(
+                "https://modrinth.com/hosting/manage".into()
+            )))
+            .style(ghost_style),
+        button(text(t("Refresh")).size(10).color(fg()))
+            .padding([5, 9])
+            .on_press(Msg::User(Message::HostingRefresh))
+            .style(ghost_style),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    if view.modrinth_account.is_none() {
+        return column![
+            header,
+            container(
+                column![
+                    text(t("Sign in to manage your hosted servers"))
+                        .size(15)
+                        .color(fg()),
+                    text(t(
+                        "Modrinth Hosting servers are tied to your Modrinth account."
+                    ))
+                    .size(11)
+                    .color(muted_c()),
+                    button(text(t("Sign in")).size(11).color(ink_c()))
+                        .padding([7, 14])
+                        .on_press(Msg::User(Message::Navigate(Page::Account)))
+                        .style(primary_style),
+                ]
+                .spacing(8),
+            )
+            .padding(18)
+            .style(card_style),
+        ]
+        .spacing(12)
+        .into();
+    }
+
+    let query = hosting.query.trim().to_lowercase();
+    let filtered: Vec<&HostedServerView> = hosting
+        .servers
+        .iter()
+        .filter(|server| {
+            query.is_empty()
+                || server.name.to_lowercase().contains(&query)
+                || server.address.to_lowercase().contains(&query)
+                || server.status.to_lowercase().contains(&query)
+        })
+        .collect();
+    let mut body = column![
+        header,
+        row![
+            text_input(t("Search servers…"), &hosting.query)
+                .size(11)
+                .padding(7)
+                .on_input(|value| Msg::User(Message::HostingQueryChanged(
+                    value
+                )))
+                .style(text_input_style)
+                .width(Length::Fill),
+            text(format!("{} {}", filtered.len(), t("servers")))
+                .size(9)
+                .color(muted_c()),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(10);
+    if hosting.loading {
+        body = body.push(text(t("Loading servers…")).size(11).color(muted_c()));
+    }
+    if let Some(error) = &hosting.error {
+        body = body.push(
+            container(text(error).size(11).color(danger_c()))
+                .padding(10)
+                .width(Length::Fill)
+                .style(danger_style),
+        );
+    }
+    if hosting.loaded && hosting.servers.is_empty() && hosting.error.is_none() {
+        body = body.push(
+            container(
+                column![
+                    text(t("No hosted servers yet")).size(15).color(fg()),
+                    text(t(
+                        "Get a Modrinth-hosted server and it will appear here."
+                    ))
+                    .size(11)
+                    .color(muted_c()),
+                    button(text(t("Explore hosting")).size(11).color(ink_c()))
+                        .padding([7, 14])
+                        .on_press(Msg::User(Message::OpenUrl(
+                            "https://modrinth.com/hosting".into()
+                        )))
+                        .style(primary_style),
+                ]
+                .spacing(8),
+            )
+            .padding(18)
+            .style(card_style),
+        );
+    }
+
+    let mut list = column![].spacing(8);
+    for server in &filtered {
+        list = list.push(hosted_server_card(
+            server,
+            hosting.pending.as_deref(),
+            hosting.renaming.as_ref(),
+        ));
+    }
+    if filtered.is_empty() && !hosting.servers.is_empty() {
+        list = list.push(
+            text(t("No servers match your search."))
+                .size(11)
+                .color(muted_c()),
+        );
+    }
+    body = body.push(scrollable(list).height(Length::Fill));
+
+    body.into()
+}
+
+fn hosted_server_card<'a>(
+    server: &'a HostedServerView,
+    pending: Option<&str>,
+    rename: Option<&'a HostingRename>,
+) -> Element<'a, Msg> {
+    let busy = pending == Some(server.id.as_str());
+    let status = match server.status.as_str() {
+        "available" => (t("Ready"), accent_c()),
+        "installing" => (t("Installing"), warning_c()),
+        "broken" => (t("Needs attention"), danger_c()),
+        "suspended" => (t("Suspended"), danger_c()),
+        other => (other, muted_c()),
+    };
+    let mut meta = Vec::new();
+    if let Some(loader) = &server.loader {
+        meta.push(loader.clone());
+    }
+    if let Some(version) = &server.mc_version {
+        meta.push(version.clone());
+    }
+    if !server.datacenter.is_empty() {
+        meta.push(server.datacenter.clone());
+    }
+    let mut badges = row![
+        text(status.0).size(9).color(status.1),
+        text(format!("● {}", server.address))
+            .size(10)
+            .color(muted_c()),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+    if server.is_medal {
+        badges = badges.push(text(t("Medal")).size(9).color(warning_c()));
+    }
+
+    let mut actions = row![].spacing(5).align_y(Alignment::Center);
+    if server.status == "available" || server.status == "broken" {
+        for (label, action) in [
+            ("Start", HostingPowerAction::Start),
+            ("Restart", HostingPowerAction::Restart),
+            ("Stop", HostingPowerAction::Stop),
+            ("Kill", HostingPowerAction::Kill),
+        ] {
+            actions = actions.push(
+                button(text(t(label)).size(9).color(
+                    if action == HostingPowerAction::Kill {
+                        danger_c()
+                    } else {
+                        fg()
+                    },
+                ))
+                .padding([4, 8])
+                .on_press(Msg::User(Message::HostingPower {
+                    server_id: server.id.clone(),
+                    action,
+                }))
+                .style(ghost_style),
+            );
+        }
+    }
+    actions = actions.push(
+        button(text(t("Rename")).size(9).color(muted_c()))
+            .padding([4, 8])
+            .on_press(Msg::User(Message::HostingAskRename {
+                server_id: server.id.clone(),
+                name: server.name.clone(),
+            }))
+            .style(ghost_style),
+    );
+    actions = actions.push(
+        button(text(t("Manage")).size(9).color(ink_c()))
+            .padding([4, 9])
+            .on_press(Msg::User(Message::OpenUrl(format!(
+                "https://modrinth.com/hosting/manage/{}",
+                server.id
+            ))))
+            .style(primary_style),
+    );
+    if busy {
+        actions = actions.push(text(t("Working…")).size(9).color(warning_c()));
+    }
+
+    let mut card = column![
+        row![
+            column![text(&server.name).size(15).color(fg()), badges,]
+                .spacing(5)
+                .width(Length::Fill),
+            text(meta.join(" · ")).size(10).color(muted_c()),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
+        if let Some(reason) = &server.suspension_reason {
+            Element::from(
+                text(format!("{}: {reason}", t("Suspended")))
+                    .size(10)
+                    .color(danger_c()),
+            )
+        } else {
+            Element::from(Space::new())
+        },
+        actions,
+    ]
+    .spacing(8);
+    if let Some(rename) = rename.filter(|rename| rename.server_id == server.id)
+    {
+        card = card.push(
+            row![
+                text_input(t("Server name"), &rename.name)
+                    .size(11)
+                    .padding(7)
+                    .on_input(|value| Msg::User(Message::HostingRenameChanged(
+                        value
+                    )))
+                    .on_submit(Msg::User(Message::HostingRenameSave))
+                    .style(text_input_style)
+                    .width(Length::Fill),
+                button(text(t("Save")).size(9).color(ink_c()))
+                    .padding([5, 9])
+                    .on_press(Msg::User(Message::HostingRenameSave))
+                    .style(primary_style),
+                button(text(t("Cancel")).size(9).color(muted_c()))
+                    .padding([5, 9])
+                    .on_press(Msg::User(Message::HostingRenameCancel))
+                    .style(ghost_style),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        );
+    }
+
+    container(card)
+        .padding(14)
+        .width(Length::Fill)
+        .style(card_style)
+        .into()
 }
 
 fn settings(view: &ViewModel) -> Element<'_, Msg> {
@@ -4329,6 +5329,15 @@ fn settings(view: &ViewModel) -> Element<'_, Msg> {
                     "Advanced rendering",
                     settings.advanced_rendering,
                     SettingChange::ToggleAdvancedRendering
+                ),
+                toggle_row(
+                    "Reduce motion",
+                    settings
+                        .feature_flags
+                        .get(&FeatureFlag::ReduceMotion)
+                        .copied()
+                        .unwrap_or(false),
+                    SettingChange::ToggleReduceMotion
                 ),
                 toggle_row(
                     "Native decorations",

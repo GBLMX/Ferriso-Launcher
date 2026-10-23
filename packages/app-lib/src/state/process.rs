@@ -1,7 +1,7 @@
 use crate::event::emit::{emit_instance, emit_process};
-use crate::event::{InstancePayloadType, ProcessPayloadType};
-#[cfg(feature = "tauri")]
-use crate::event::{LogEvent, LogPayload};
+use crate::event::{
+    InstancePayloadType, LogEvent, LogPayload, ProcessPayloadType,
+};
 use crate::util::io::IOError;
 use crate::util::rpc::RpcServer;
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
@@ -606,37 +606,23 @@ impl Process {
             }
         }
 
-        #[cfg(feature = "tauri")]
-        {
-            let event_state = crate::EventState::get();
-            let _ = event_state.send(crate::event::AppEvent::Log(LogPayload {
-                instance_id: instance_id.to_string(),
-                event: LogEvent::Log4j(event.clone()),
-            }));
-        }
-        #[cfg(not(feature = "tauri"))]
-        {
-            let _ = (instance_id, event);
-        }
+        let event_state = crate::EventState::get();
+        let _ = event_state.send(crate::event::AppEvent::Log(LogPayload {
+            instance_id: instance_id.to_string(),
+            event: LogEvent::Log4j(event.clone()),
+        }));
     }
 
     fn emit_legacy_log(instance_id: &str, message: &str) {
         push_log_line(instance_id, message.to_string());
 
-        #[cfg(feature = "tauri")]
-        {
-            let event_state = crate::EventState::get();
-            let _ = event_state.send(crate::event::AppEvent::Log(LogPayload {
-                instance_id: instance_id.to_string(),
-                event: LogEvent::Legacy {
-                    message: message.to_string(),
-                },
-            }));
-        }
-        #[cfg(not(feature = "tauri"))]
-        {
-            let _ = (instance_id, message);
-        }
+        let event_state = crate::EventState::get();
+        let _ = event_state.send(crate::event::AppEvent::Log(LogPayload {
+            instance_id: instance_id.to_string(),
+            event: LogEvent::Legacy {
+                message: message.to_string(),
+            },
+        }));
     }
 
     fn append_to_log_file(
@@ -816,7 +802,7 @@ impl Process {
             &instance_id,
             uuid,
             ProcessPayloadType::Finished,
-            "Exited process",
+            &format!("Exited with {mc_exit_status}"),
         )
         .await?;
 

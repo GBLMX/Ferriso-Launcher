@@ -2,6 +2,7 @@
 pub mod cache;
 pub mod friends;
 pub mod handler;
+pub mod hosting;
 pub mod instance;
 pub mod jre;
 pub mod logs;
@@ -24,7 +25,7 @@ pub mod data {
         AppliedContentSetPatch, CacheBehaviour, CacheValueType, ContentFile,
         ContentItem, ContentItemOwner, ContentItemProject, ContentItemVersion,
         CreateInstance, Credentials, Dependency, DirectoryInfo, EditInstance,
-        Hooks, InstanceIconBackground, InstanceIconConfig,
+        FeatureFlag, Hooks, InstanceIconBackground, InstanceIconConfig,
         InstanceInstallCandidate, InstanceInstallTarget,
         InstanceLaunchOverridesPatch, InstanceLink, InstanceMetadata,
         JavaVersion, LinkedModpackInfo, MemorySettings, ModLoader,

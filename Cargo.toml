@@ -13,6 +13,7 @@ members = [
   "packages/modrinth-content-management",
   "packages/modrinth-log",
   "packages/modrinth-maxmind",
+  "packages/ferriso-access",
   "packages/modrinth-util",
   "packages/neverbounce",
   "packages/path-util",
@@ -213,6 +214,7 @@ tauri-plugin-updater = { git = "https://github.com/modrinth/plugins-workspace", 
 ] }
 tauri-plugin-window-state = "2.4.0"
 tempfile = "3.23.0"
+ferriso-access = { path = "packages/ferriso-access" }
 ferriso-config = { git = "https://github.com/GBLMX/Ferriso", rev = "b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9" }
 ferriso-core = { git = "https://github.com/GBLMX/Ferriso", rev = "b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9" }
 ferriso-diagnostics = { git = "https://github.com/GBLMX/Ferriso", rev = "b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9" }
@@ -315,3 +317,6 @@ opt-level = 2
 strip = false  # Keep debug symbols for Sentry
 lto = "thin"  # Enable LTO but keep compile times reasonable
 panic = "unwind"  # Don't exit the whole app on panic in production
+
+[patch.crates-io]
+iced_winit = { path = "vendor/iced_winit" }
