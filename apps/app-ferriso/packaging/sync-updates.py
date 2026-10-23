@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -68,8 +69,17 @@ def fetch_json(url: str) -> object:
             "User-Agent": USER_AGENT,
         },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return json.load(response)
+        except (OSError, ValueError) as error:
+            last_error = error
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+    assert last_error is not None
+    raise last_error
 
 
 def download(url: str, destination: Path) -> None:
@@ -80,14 +90,22 @@ def download(url: str, destination: Path) -> None:
     request = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT}
     )
-    try:
-        with urllib.request.urlopen(request, timeout=300) as source:
-            with partial.open("wb") as target:
-                shutil.copyfileobj(source, target)
-        os.replace(partial, destination)
-        destination.chmod(0o644)
-    finally:
-        partial.unlink(missing_ok=True)
+    last_error: OSError | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=600) as source:
+                with partial.open("wb") as target:
+                    shutil.copyfileobj(source, target)
+            os.replace(partial, destination)
+            destination.chmod(0o644)
+            return
+        except OSError as error:
+            last_error = error
+            partial.unlink(missing_ok=True)
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+    assert last_error is not None
+    raise last_error
 
 
 def version_key(version: str) -> tuple[object, ...]:
@@ -190,13 +208,35 @@ def manifest_asset_names(manifest: dict[str, object]) -> set[str]:
     return names
 
 
+def manifest_version(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text()).get("version")
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, str) else None
+
+
 def publish(releases: list[Release]) -> dict[str, Release | None]:
     targets = {
         channel: latest_for(releases, channel) for channel in CHANNELS
     }
+    pending: dict[str, Release | None] = {}
+    for channel, target in targets.items():
+        path = MANIFESTS[channel]
+        if target is None:
+            if channel != "stable" and path.exists():
+                pending[channel] = None
+        elif manifest_version(path) != target.version:
+            pending[channel] = target
+
+    if not pending:
+        return pending
+
     manifests: dict[str, dict[str, object]] = {}
     selected = {
-        target.tag: target for target in targets.values() if target
+        target.tag: target for target in pending.values() if target
     }
     for release in selected.values():
         if "ferriso-updates.json" not in release.assets:
@@ -224,24 +264,10 @@ def publish(releases: list[Release]) -> dict[str, Release | None]:
         if checksum_url:
             download(checksum_url, ROOT / release.tag / "SHA256SUMS")
 
-    changed: dict[str, Release | None] = {}
-    for channel in CHANNELS:
-        target = targets[channel]
+    for channel, target in pending.items():
         path = MANIFESTS[channel]
         if target is None:
-            if channel != "stable":
-                path.unlink(missing_ok=True)
-            continue
-        current = None
-        if path.exists():
-            try:
-                current = json.loads(path.read_text()).get("version")
-            except (OSError, ValueError):
-                current = None
-        if current == target.version:
-            continue
-        if DRY_RUN:
-            changed[channel] = target
+            path.unlink(missing_ok=True)
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
         partial = path.with_name(path.name + ".part")
@@ -250,8 +276,7 @@ def publish(releases: list[Release]) -> dict[str, Release | None]:
         )
         partial.chmod(0o644)
         os.replace(partial, path)
-        changed[channel] = target
-    return changed
+    return pending
 
 
 def main() -> int:
@@ -263,7 +288,7 @@ def main() -> int:
             for release in [parse_release(raw)]
             if release is not None
         ]
-    except (OSError, ValueError, KeyError) as error:
+    except (OSError, ValueError, KeyError, RuntimeError) as error:
         print(f"release list failed: {error}", file=sys.stderr)
         return 1
 
@@ -284,7 +309,7 @@ def main() -> int:
             return 0
         try:
             changed = publish(releases)
-        except (OSError, ValueError, KeyError) as error:
+        except (OSError, ValueError, KeyError, RuntimeError) as error:
             print(f"publish failed: {error}", file=sys.stderr)
             return 1
     finally:

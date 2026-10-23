@@ -181,6 +181,7 @@ jobs:
     env:
       GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -241,3 +242,33 @@ jobs:
             prerelease=(--prerelease)
           fi
           gh release create -R "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "${prerelease[@]}" dist/* --title "Ferriso Launcher $GITHUB_REF_NAME" --generate-notes
+      - name: Build channel mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FERRISO_UPDATE_ROOT: ${{ runner.temp }}/ferriso-mirror
+          FERRISO_UPDATE_LOCK: ${{ runner.temp }}/ferriso-mirror.lock
+          FERRISO_UPDATE_BASE_URL: https://updates.bionickernel.com
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 3
+          done
+          python3 apps/app-ferriso/packaging/sync-updates.py
+      - name: Deploy channel mirror
+        env:
+          FERRISO_DEPLOY_KEY: ${{ secrets.FERRISO_DEPLOY_KEY }}
+          FERRISO_DEPLOY_HOST: ${{ secrets.FERRISO_DEPLOY_HOST }}
+        run: |
+          set -o pipefail
+          if [[ -z "$FERRISO_DEPLOY_KEY" || -z "$FERRISO_DEPLOY_HOST" ]]; then
+            echo "deployment secrets are not configured" >&2
+            exit 1
+          fi
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$FERRISO_DEPLOY_KEY" > ~/.ssh/ferriso-deploy
+          chmod 600 ~/.ssh/ferriso-deploy
+          ssh-keyscan -H "$FERRISO_DEPLOY_HOST" >> ~/.ssh/known_hosts
+          (cd "$RUNNER_TEMP/ferriso-mirror" && tar -czf - *) \
+            | ssh -i ~/.ssh/ferriso-deploy "ferriso-deploy@$FERRISO_DEPLOY_HOST"
