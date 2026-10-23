@@ -242,20 +242,14 @@ jobs:
             prerelease=(--prerelease)
           fi
           gh release create -R "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "${prerelease[@]}" dist/* --title "Ferriso Launcher $GITHUB_REF_NAME" --generate-notes
-      - name: Build channel mirror
+      - name: Stage release mirror
         env:
-          GH_TOKEN: ${{ github.token }}
           FERRISO_UPDATE_ROOT: ${{ runner.temp }}/ferriso-mirror
-          FERRISO_UPDATE_LOCK: ${{ runner.temp }}/ferriso-mirror.lock
-          FERRISO_UPDATE_BASE_URL: https://updates.bionickernel.com
         run: |
-          for attempt in 1 2 3 4 5; do
-            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-              break
-            fi
-            sleep 3
-          done
-          python3 apps/app-ferriso/packaging/sync-updates.py
+          python3 apps/app-ferriso/packaging/stage-release.py \
+            --dist dist \
+            --output "$FERRISO_UPDATE_ROOT" \
+            --tag "$GITHUB_REF_NAME"
       - name: Deploy channel mirror
         env:
           FERRISO_DEPLOY_KEY: ${{ secrets.FERRISO_DEPLOY_KEY }}

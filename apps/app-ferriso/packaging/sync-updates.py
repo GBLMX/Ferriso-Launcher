@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
-"""Publish stable, beta, and alpha update feeds from GitHub releases.
+"""Publish stable, beta, and alpha update feeds from release directories.
 
-Run from cron on the mirror host:
+`--local` scans `FERRISO_UPDATE_ROOT/ferriso-v*` for staged releases and writes
+the three channel manifests without network access. This is the mode used
+after the release workflow uploads artifacts:
+
+    FERRISO_UPDATE_ROOT=/var/www/ferriso-updates \
+    apps/app-ferriso/packaging/sync-updates.py --local
+
+Without `--local`, the script reads GitHub releases and downloads their assets
+for manual mirror recovery:
 
     FERRISO_UPDATE_ROOT=/var/www/ferriso-updates \
     FERRISO_UPDATE_BASE_URL=https://updates.bionickernel.com \
@@ -9,8 +17,8 @@ Run from cron on the mirror host:
 
 Each channel selects the newest release it is allowed to run: stable for the
 stable feed, stable/beta for beta, and stable/beta/alpha for alpha. Assets and
-manifests are downloaded before any channel file is replaced, so clients never
-see a feed pointing at missing files.
+manifests are checked before any channel file is replaced, so clients never see
+a feed pointing at missing files.
 """
 
 from __future__ import annotations
@@ -123,6 +131,19 @@ def version_key(version: str) -> tuple[object, ...]:
     return (main, 0, identifiers)
 
 
+def channel_for_version(version: str) -> str:
+    match = SEMVER.fullmatch(version)
+    if match is None:
+        raise ValueError(f"invalid release version: {version}")
+    prerelease = match.group(4)
+    if prerelease is None:
+        return "stable"
+    if prerelease.startswith("alpha"):
+        return "alpha"
+    # `rc` and any future pre-release kind are beta-visible.
+    return "beta"
+
+
 def parse_release(raw: dict[str, object]) -> Release | None:
     if raw.get("draft"):
         return None
@@ -130,17 +151,10 @@ def parse_release(raw: dict[str, object]) -> Release | None:
     if not tag.startswith("ferriso-v"):
         return None
     version = tag.removeprefix("ferriso-v")
-    match = SEMVER.fullmatch(version)
-    if match is None:
+    try:
+        channel = channel_for_version(version)
+    except ValueError:
         return None
-    prerelease = match.group(4)
-    if prerelease is None:
-        channel = "stable"
-    elif prerelease.startswith("alpha"):
-        channel = "alpha"
-    else:
-        # `rc` and any future pre-release kind are beta-visible.
-        channel = "beta"
     assets = {
         str(asset["name"]): str(asset["browser_download_url"])
         for asset in raw.get("assets", [])
@@ -218,6 +232,76 @@ def manifest_version(path: Path) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def load_local_releases() -> list[Release]:
+    releases: list[Release] = []
+    if not ROOT.is_dir():
+        raise RuntimeError(f"mirror root is missing: {ROOT}")
+    for directory in ROOT.iterdir():
+        if not directory.is_dir() or not directory.name.startswith(
+            "ferriso-v"
+        ):
+            continue
+        version = directory.name.removeprefix("ferriso-v")
+        manifest_path = directory / "ferriso-updates.json"
+        if not manifest_path.is_file():
+            continue
+        try:
+            channel = channel_for_version(version)
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(manifest, dict):
+            continue
+        if manifest.get("version") != version:
+            continue
+        releases.append(
+            Release(directory.name, version, channel, {})
+        )
+    return releases
+
+
+def write_manifest(path: Path, manifest: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(path.name + ".part")
+    partial.write_text(json.dumps(manifest, indent=2) + "\n")
+    partial.chmod(0o644)
+    os.replace(partial, path)
+
+
+def publish_local() -> dict[str, Release | None]:
+    releases = load_local_releases()
+    targets = {
+        channel: latest_for(releases, channel) for channel in CHANNELS
+    }
+    pending: dict[str, Release | None] = {}
+    for channel, target in targets.items():
+        path = MANIFESTS[channel]
+        if target is None:
+            if channel != "stable" and path.exists():
+                pending[channel] = None
+        elif manifest_version(path) != target.version:
+            pending[channel] = target
+
+    for channel, target in pending.items():
+        path = MANIFESTS[channel]
+        if target is None:
+            path.unlink(missing_ok=True)
+            continue
+        raw = json.loads(
+            (ROOT / target.tag / "ferriso-updates.json").read_text()
+        )
+        if not isinstance(raw, dict) or raw.get("version") != target.version:
+            raise RuntimeError(f"{target.tag}: invalid local manifest")
+        manifest = rewrite_manifest(raw, target)
+        for name in manifest_asset_names(manifest):
+            if not (ROOT / target.tag / name).is_file():
+                raise RuntimeError(
+                    f"{target.tag}: manifest references missing asset {name}"
+                )
+        write_manifest(path, manifest)
+    return pending
+
+
 def publish(releases: list[Release]) -> dict[str, Release | None]:
     targets = {
         channel: latest_for(releases, channel) for channel in CHANNELS
@@ -280,6 +364,17 @@ def publish(releases: list[Release]) -> dict[str, Release | None]:
 
 
 def main() -> int:
+    if "--local" in sys.argv[1:]:
+        try:
+            changed = publish_local()
+        except (OSError, ValueError, KeyError, RuntimeError) as error:
+            print(f"local publish failed: {error}", file=sys.stderr)
+            return 1
+        for channel, target in changed.items():
+            if target is not None:
+                print(f"{channel}: {target.tag}")
+        return 0
+
     try:
         releases = [
             release

@@ -46,14 +46,13 @@ alpha append `-beta` and `-alpha` before `.json`. When the mirror is
 unreachable it falls back to the latest stable GitHub release asset. Set
 `FERRISO_UPDATE_URL` to test another manifest without a rebuild.
 
-The release workflow builds the channel mirror on the GitHub runner and uploads
-it to the mirror host; `apps/app-ferriso/packaging/sync-updates.py` is also
-installed on the host for manual or cron fallback. The script selects the
-newest stable, beta, and alpha releases, downloads their assets, rewrites their
-URLs, and replaces each channel manifest atomically so clients never see a
-partial release. Deployment uses the `FERRISO_DEPLOY_KEY` and
-`FERRISO_DEPLOY_HOST` repository secrets; the host accepts that key only for
-`tar` extraction into the mirror directory.
+The release workflow stages each release from the CI build artifacts and
+uploads it to the mirror host; the host selects stable, beta, and alpha from
+the local release directories using
+`apps/app-ferriso/packaging/sync-updates.py --local`. The same script's remote
+mode remains available for manual GitHub fetches. Deployment uses the
+`FERRISO_DEPLOY_KEY` and `FERRISO_DEPLOY_HOST` repository secrets; the host
+accepts that key only for the restricted release-publish command.
 
 ## Accessibility
 
