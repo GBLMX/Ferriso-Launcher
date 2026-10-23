@@ -4,7 +4,7 @@
 
 ## 基本信息
 
-- 位置：`E:\Code\modrinth`（Linux 工作区：`/home/wangwenjie/Projects/modrinth`）
+- 位置：`E:\Code\modrinth`（Linux 工作区：`/home/wangwenjie/Projects/Ferriso-Launcher`）
 - 上游：`Modrinth/code`（remote `upstream` = `git@github.com:Modrinth/code.git`）
 - Fork：`GBLMX/code`（remote `origin` = `git@github.com:GBLMX/code.git`）
 - 基线：上游 `main` @ 2026-08-25（ZIP 快照导入，`eae097b`，**与上游无共享 git 历史**）
