@@ -48,6 +48,27 @@ fn startup() -> (Page, Option<String>, Option<String>, Option<String>) {
     (page, query, instance, project)
 }
 
+fn startup_settings() -> Option<theseus::data::Settings> {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("could not start settings preload runtime: {error}");
+            return None;
+        }
+    };
+    match runtime.block_on(theseus::settings::get_startup(app::APP_IDENTIFIER))
+    {
+        Ok(settings) => Some(settings),
+        Err(error) => {
+            eprintln!("could not preload settings: {error}");
+            None
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = match AppConfig::load() {
         Ok(config) => config.sanitized(),
@@ -58,7 +79,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let (page, query, instance, project) = startup();
     theseus::start_logger(app::APP_IDENTIFIER);
-    let app = if let Some(project) = project {
+    i18n::set_locale(&i18n::system_locale());
+    let startup_settings = startup_settings();
+    if let Some(settings) = startup_settings.as_ref() {
+        i18n::set_locale(&settings.locale);
+    }
+    let mut app = if let Some(project) = project {
         FerrisoApp::with_project(project)
     } else if let Some(instance) = instance {
         FerrisoApp::with_instance(instance)
@@ -67,6 +93,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         FerrisoApp::with_page(page)
     };
+    if let Some(settings) = startup_settings {
+        app = app.with_initial_settings(settings);
+    }
     let app = app.with_update_channel(config.update.channel);
 
     ferriso_gui::run(

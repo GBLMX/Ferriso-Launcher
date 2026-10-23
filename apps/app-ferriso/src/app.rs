@@ -1467,6 +1467,16 @@ pub struct FerrisoApp {
 }
 
 impl FerrisoApp {
+    /// Seed persisted preferences before the first render.
+    ///
+    /// The actor still publishes an un-booted view, but that view now carries
+    /// the saved locale and theme instead of the defaults.
+    #[must_use]
+    pub fn with_initial_settings(mut self, settings: Settings) -> Self {
+        self.settings = Some(settings);
+        self
+    }
+
     pub fn new() -> Self {
         Self {
             page: Page::Home,

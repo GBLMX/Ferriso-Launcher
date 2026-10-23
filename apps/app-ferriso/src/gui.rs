@@ -596,12 +596,9 @@ impl Default for FerrisoGui {
 
 impl Renderer<ViewModel, Message> for FerrisoGui {
     fn view<'a>(&'a self, view: &'a ViewModel) -> Element<'a, Msg> {
-        i18n::set_locale(
-            view.settings
-                .as_ref()
-                .map(|settings| settings.locale.as_str())
-                .unwrap_or("en-US"),
-        );
+        if let Some(settings) = view.settings.as_ref() {
+            i18n::set_locale(&settings.locale);
+        }
         set_theme(
             view.settings
                 .as_ref()
@@ -816,12 +813,9 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
     }
 
     fn title(&self, view: &ViewModel) -> Option<String> {
-        i18n::set_locale(
-            view.settings
-                .as_ref()
-                .map(|settings| settings.locale.as_str())
-                .unwrap_or("en-US"),
-        );
+        if let Some(settings) = view.settings.as_ref() {
+            i18n::set_locale(&settings.locale);
+        }
         Some(format!("{} · {}", self.title, t(view.page.label())))
     }
 }
@@ -1205,7 +1199,7 @@ fn loading_card(status: &str) -> Element<'_, Msg> {
     container(
         column![
             text(t("Starting Ferriso Launcher")).size(22).color(fg()),
-            text(status).size(13).color(muted_c()),
+            text(t(status)).size(13).color(muted_c()),
         ]
         .spacing(8),
     )

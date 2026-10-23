@@ -162,9 +162,46 @@ pub const LOCALES: [Locale; 33] = [
     },
 ];
 
+/// The locale requested by the desktop session, normalized to a catalog code.
+///
+/// This is only the startup fallback: `Settings.locale` replaces it as soon as
+/// the backend snapshot arrives.
+pub fn system_locale() -> String {
+    for key in ["LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"] {
+        let Ok(value) = std::env::var(key) else {
+            continue;
+        };
+        if let Some(first) = value
+            .split(':')
+            .map(str::trim)
+            .find(|entry| !entry.is_empty())
+        {
+            return normalize_locale(first);
+        }
+    }
+    "en-US".into()
+}
+
+/// Turn POSIX spellings such as `zh_CN.UTF-8` or `de_DE@euro` into the
+/// BCP-47-like codes used by [`LOCALES`].
+fn normalize_locale(locale: &str) -> String {
+    let locale = locale.trim();
+    if locale.is_empty()
+        || locale.eq_ignore_ascii_case("C")
+        || locale.eq_ignore_ascii_case("POSIX")
+    {
+        return "en-US".into();
+    }
+    locale
+        .split(['.', '@'])
+        .next()
+        .unwrap_or(locale)
+        .replace('_', "-")
+}
+
 /// Select the language dictionary for the current view build.
 pub fn set_locale(locale: &str) {
-    let locale = locale.to_ascii_lowercase();
+    let locale = normalize_locale(locale).to_ascii_lowercase();
     let selected = LOCALES
         .iter()
         .find(|entry| entry.code.eq_ignore_ascii_case(&locale))
@@ -905,7 +942,25 @@ static LOCALE_FILES: [(&str, &str); 33] = [
 
 #[cfg(test)]
 mod tests {
-    use super::{set_locale, t};
+    use super::{normalize_locale, set_locale, t};
+
+    #[test]
+    fn normalizes_posix_locale_spellings() {
+        assert_eq!(normalize_locale("zh_CN.UTF-8"), "zh-CN");
+        assert_eq!(normalize_locale("de_DE@euro"), "de-DE");
+        assert_eq!(normalize_locale(" en_US.UTF-8 "), "en-US");
+        assert_eq!(normalize_locale("C"), "en-US");
+        assert_eq!(normalize_locale("POSIX"), "en-US");
+        assert_eq!(normalize_locale(""), "en-US");
+    }
+
+    #[test]
+    fn selects_a_locale_from_a_posix_environment_value() {
+        set_locale("zh_CN.UTF-8");
+        assert_eq!(t("Home"), "主页");
+        set_locale("C");
+        assert_eq!(t("Home"), "Home");
+    }
 
     #[test]
     fn selects_the_persisted_locale_and_falls_back() {
