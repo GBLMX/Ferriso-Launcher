@@ -16,7 +16,7 @@ pub fn authenticate_begin_flow(flow: ModrinthAuthFlow) -> &'static str {
     }
 }
 
-#[tracing::instrument]
+#[tracing::instrument(skip_all)]
 pub async fn authenticate_finish_flow(
     code: &str,
 ) -> crate::Result<ModrinthCredentials> {

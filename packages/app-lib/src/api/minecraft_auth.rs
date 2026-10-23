@@ -26,7 +26,7 @@ pub async fn begin_login() -> crate::Result<MinecraftLoginFlow> {
     crate::state::login_begin(&state.pool).await
 }
 
-#[tracing::instrument]
+#[tracing::instrument(skip_all)]
 pub async fn finish_login(
     code: &str,
     flow: MinecraftLoginFlow,

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(feature = "tauri")]
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, broadcast};
 use uuid::Uuid;
 
 use crate::install::InstallJobSnapshot;
@@ -25,6 +25,7 @@ pub struct EventState {
     #[cfg(feature = "tauri")]
     event_channel: RwLock<Channel<InvokeResponseBody>>,
     pub loading_bars: DashMap<Uuid, LoadingBar>,
+    native_events: broadcast::Sender<AppEvent>,
 }
 
 impl EventState {
@@ -39,6 +40,7 @@ impl EventState {
                     app,
                     event_channel: RwLock::new(event_channel.clone()),
                     loading_bars: DashMap::new(),
+                    native_events: broadcast::channel(256).0,
                 }))
             })
             .await
@@ -54,6 +56,7 @@ impl EventState {
             .get_or_try_init(|| async {
                 Ok(Arc::new(Self {
                     loading_bars: DashMap::new(),
+                    native_events: broadcast::channel(256).0,
                 }))
             })
             .await
@@ -67,15 +70,28 @@ impl EventState {
             .clone()
     }
 
-    #[cfg(feature = "tauri")]
     pub fn send(&self, event: AppEvent) -> crate::Result<()> {
-        let payload =
-            postcard::to_allocvec(&event).map_err(EventError::from)?;
-        self.event_channel
-            .read()
-            .send(InvokeResponseBody::Raw(payload))
-            .map_err(EventError::from)?;
+        #[cfg(feature = "tauri")]
+        {
+            let payload =
+                postcard::to_allocvec(&event).map_err(EventError::from)?;
+            self.event_channel
+                .read()
+                .send(InvokeResponseBody::Raw(payload))
+                .map_err(EventError::from)?;
+        }
+        // Native frontends have no Tauri channel; a bounded broadcast also
+        // lets them react to installs, processes, and log events without
+        // polling. A lagging subscriber is dropped rather than blocking the
+        // launcher.
+        let _ = self.native_events.send(event);
         Ok(())
+    }
+
+    /// Subscribe to backend events for a native frontend. The receiver is
+    /// intentionally bounded; callers must tolerate `Lagged` and resync.
+    pub fn subscribe(&self) -> broadcast::Receiver<AppEvent> {
+        self.native_events.subscribe()
     }
 
     // Values provided should not be used directly, as they are clones and are not guaranteed to be up-to-date
@@ -125,7 +141,6 @@ pub enum AppEvent {
         #[cfg_attr(feature = "export-ts", ts(type = "unknown"))] String,
     ),
     Log(LogPayload),
-    AdsConsentRequired(bool),
 }
 
 #[cfg(feature = "export-ts")]

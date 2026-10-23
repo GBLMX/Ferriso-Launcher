@@ -138,7 +138,7 @@ pub async fn login_begin(
     }
 }
 
-#[tracing::instrument]
+#[tracing::instrument(skip_all)]
 pub async fn login_finish(
     code: &str,
     flow: MinecraftLoginFlow,
@@ -948,7 +948,7 @@ struct OAuthToken {
     // pub foci: String,
 }
 
-#[tracing::instrument]
+#[tracing::instrument(skip_all)]
 async fn oauth_token(
     code: &str,
     verifier: &str,
@@ -998,7 +998,7 @@ async fn oauth_token(
     })
 }
 
-#[tracing::instrument]
+#[tracing::instrument(skip_all)]
 async fn oauth_refresh(
     refresh_token: &str,
 ) -> Result<RequestWithDate<OAuthToken>, MinecraftAuthenticationError> {

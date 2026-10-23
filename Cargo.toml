@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "apps/app",
+  "apps/app-ferriso",
   "apps/app-playground",
   "apps/daedalus_client",
   "apps/labrinth",
@@ -212,7 +213,13 @@ tauri-plugin-updater = { git = "https://github.com/modrinth/plugins-workspace", 
 ] }
 tauri-plugin-window-state = "2.4.0"
 tempfile = "3.23.0"
+ferriso-config = { git = "https://github.com/GBLMX/Ferriso", rev = "b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9" }
+ferriso-core = { git = "https://github.com/GBLMX/Ferriso", rev = "b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9" }
+ferriso-diagnostics = { git = "https://github.com/GBLMX/Ferriso", rev = "b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9" }
+ferriso-gui = { git = "https://github.com/GBLMX/Ferriso", rev = "b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9" }
+ferriso-keymap = { git = "https://github.com/GBLMX/Ferriso", rev = "b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9" }
 theseus = { path = "packages/app-lib" }
+webbrowser = "1.0"
 thiserror = "2.0.17"
 tikv-jemalloc-ctl = "0.6.0"
 tikv-jemallocator = "0.6.0"

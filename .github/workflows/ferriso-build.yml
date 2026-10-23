@@ -1,0 +1,183 @@
+name: Ferriso Launcher build
+
+on:
+  push:
+    branches: [main]
+    tags: ['ferriso-v*']
+    paths:
+      - '.github/workflows/ferriso-build.yml'
+      - 'apps/app-ferriso/**'
+      - 'packages/app-lib/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+  pull_request:
+    paths:
+      - '.github/workflows/ferriso-build.yml'
+      - 'apps/app-ferriso/**'
+      - 'packages/app-lib/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  SQLX_OFFLINE: 'true'
+
+jobs:
+  linux:
+    name: Linux build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev \
+            libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev \
+            libfreetype-dev libvulkan-dev libegl1-mesa-dev
+      - name: Configure launcher environment
+        run: cp packages/app-lib/.env.prod packages/app-lib/.env
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF_NAME" == ferriso-v* ]]; then
+            echo "FERRISO_VERSION=${GITHUB_REF_NAME#ferriso-v}" >> "$GITHUB_ENV"
+          else
+            echo "FERRISO_VERSION=0.0.0-dev" >> "$GITHUB_ENV"
+          fi
+      - name: Test
+        run: cargo test --locked -p ferriso-launcher
+      - name: Lint
+        run: cargo clippy --locked -p ferriso-launcher --all-targets -- -D warnings
+      - name: Build release binary
+        run: cargo build --release --locked -p ferriso-launcher
+      - name: Package tar and deb
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb -p ferriso-launcher --no-build
+          tar -C target/release -czf "ferriso-launcher-${FERRISO_VERSION}-linux-x86_64.tar.gz" ferriso-launcher
+          sha256sum target/debian/*.deb "ferriso-launcher-${FERRISO_VERSION}-linux-x86_64.tar.gz" > SHA256SUMS-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ferriso-linux
+          path: |
+            ferriso-launcher-*-linux-x86_64.tar.gz
+            target/debian/*.deb
+            SHA256SUMS-linux
+          if-no-files-found: error
+
+  windows:
+    name: Windows build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Configure launcher environment
+        shell: pwsh
+        run: Copy-Item packages/app-lib/.env.prod packages/app-lib/.env
+      - name: Version
+        shell: pwsh
+        run: |
+          if ("$env:GITHUB_REF_NAME" -like "ferriso-v*") {
+            $version = "$env:GITHUB_REF_NAME".Substring(9)
+          } else {
+            $version = "0.0.0-dev"
+          }
+          "FERRISO_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Test
+        run: cargo test --locked -p ferriso-launcher
+      - name: Build release binary
+        run: cargo build --release --locked -p ferriso-launcher
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis --no-progress -y
+          echo "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: Build installer
+        shell: pwsh
+        run: |
+          Push-Location apps/app-ferriso/packaging
+          makensis /DVERSION=$env:FERRISO_VERSION ferriso-launcher.nsi
+          Pop-Location
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-FileHash target/release/ferriso-launcher.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  ferriso-launcher.exe" } | Set-Content SHA256SUMS-windows
+          Get-FileHash "apps/app-ferriso/packaging/Ferriso-Launcher-$env:FERRISO_VERSION-x64-setup.exe" -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  Ferriso-Launcher-$env:FERRISO_VERSION-x64-setup.exe" } | Add-Content SHA256SUMS-windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ferriso-windows
+          path: |
+            target/release/ferriso-launcher.exe
+            apps/app-ferriso/packaging/Ferriso-Launcher-*-x64-setup.exe
+            SHA256SUMS-windows
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/ferriso-v')
+    needs: [linux, windows]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect and checksum
+        run: |
+          mkdir dist
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.exe' \) -exec cp {} dist/ \;
+          (cd dist && sha256sum * > SHA256SUMS)
+      - name: Generate native update manifest
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          VERSION="${TAG#ferriso-v}"
+          python3 - <<'PY'
+          import json, os, glob
+          tag = os.environ["TAG"]
+          repo = os.environ["REPO"]
+          version = tag.removeprefix("ferriso-v")
+          base = f"https://github.com/{repo}/releases/download/{tag}"
+          assets = {os.path.basename(p): p for p in glob.glob("dist/*")}
+          def url(name):
+              return f"{base}/{name}" if name in assets else None
+          linux_asset = next((n for n in assets if n.endswith("linux-x86_64.tar.gz")), None)
+          linux_deb = next((n for n in assets if n.endswith(".deb")), None)
+          windows_setup = next((n for n in assets if n.endswith("-setup.exe")), None)
+          platforms = {}
+          if linux_asset:
+              platforms["linux-x86_64"] = {"url": url(linux_asset), "install_urls": [url(linux_deb)] if linux_deb else [url(linux_asset)]}
+          if windows_setup:
+              platforms["windows-x86_64"] = {"url": url(windows_setup), "install_urls": [url(windows_setup)]}
+          manifest = {"version": version, "notes": "See the release notes.", "pub_date": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(), "platforms": platforms}
+          open("dist/ferriso-updates.json", "w").write(json.dumps(manifest, indent=2) + "\n")
+          print(json.dumps(manifest, indent=2))
+          PY
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Ferriso Launcher $GITHUB_REF_NAME" --generate-notes

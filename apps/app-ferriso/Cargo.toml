@@ -1,0 +1,51 @@
+[package]
+name = "ferriso-launcher"
+description = "Ferriso Launcher: an unofficial native fork of the Modrinth launcher."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "GPL-3.0-only"
+repository.workspace = true
+
+[build-dependencies]
+embed-resource = "3.0.6"
+
+[package.metadata.deb]
+maintainer = "Ferriso Launcher contributors"
+copyright = "2026, Ferriso Launcher contributors"
+license-file = ["../app/LICENSE", "0"]
+extended-description = "Ferriso Launcher is an unofficial native fork of Modrinth App. It uses Modrinth services for authentication, project metadata, and content delivery but is not affiliated with or endorsed by Modrinth."
+section = "games"
+priority = "optional"
+depends = "$auto"
+assets = [
+  ["target/release/ferriso-launcher", "usr/bin/ferriso-launcher", "755"],
+  ["packaging/com.ferriso.FerrisoLauncher.desktop", "usr/share/applications/com.ferriso.FerrisoLauncher.desktop", "644"],
+  ["packaging/com.ferriso.FerrisoLauncher.png", "usr/share/icons/hicolor/512x512/apps/com.ferriso.FerrisoLauncher.png", "644"],
+  ["packaging/com.ferriso.FerrisoLauncher.metainfo.xml", "usr/share/metainfo/com.ferriso.FerrisoLauncher.metainfo.xml", "644"],
+]
+
+[dependencies]
+base64 = { workspace = true }
+bytes = { workspace = true }
+either = { workspace = true }
+ferriso-config = { workspace = true }
+ferriso-core = { workspace = true }
+ferriso-diagnostics = { workspace = true }
+ferriso-gui = { workspace = true }
+ferriso-keymap = { workspace = true }
+futures = { workspace = true }
+image = { workspace = true, features = ["png"] }
+reqwest = { workspace = true, features = ["gzip", "http2", "rustls-tls-webpki-roots"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+semver = "1.0.27"
+theseus = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "sync", "time"] }
+urlencoding = { workspace = true }
+uuid = { workspace = true }
+webbrowser = { workspace = true }
+
+[[bin]]
+name = "ferriso-launcher"
+path = "src/main.rs"

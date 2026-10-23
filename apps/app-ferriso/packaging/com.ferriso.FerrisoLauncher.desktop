@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Ferriso Launcher
+GenericName=Minecraft Launcher
+Comment=Native Minecraft launcher for Modrinth services
+Exec=ferriso-launcher
+Icon=com.ferriso.FerrisoLauncher
+Terminal=false
+Categories=Game;
+StartupWMClass=com.ferriso.FerrisoLauncher

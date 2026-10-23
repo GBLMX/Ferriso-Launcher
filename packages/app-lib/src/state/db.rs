@@ -55,10 +55,40 @@ async fn open_app_db_pool(db_path: &Path) -> crate::Result<Pool<Sqlite>> {
         .optimize_on_close(true, None)
         .create_if_missing(true);
 
-    Ok(SqlitePoolOptions::new()
+    let pool = SqlitePoolOptions::new()
         .max_connections(100)
         .connect_with(conn_options)
-        .await?)
+        .await?;
+    restrict_database_files(db_path);
+    Ok(pool)
+}
+
+fn restrict_database_files(db_path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for suffix in ["", "-wal", "-shm"] {
+            let path = if suffix.is_empty() {
+                db_path.to_path_buf()
+            } else {
+                db_path.with_file_name(format!(
+                    "{}{suffix}",
+                    db_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("app.db")
+                ))
+            };
+            if path.exists()
+                && let Err(error) = std::fs::set_permissions(
+                    &path,
+                    std::fs::Permissions::from_mode(0o600),
+                )
+            {
+                tracing::warn!(%error, path = %path.display(), "could not restrict database permissions");
+            }
+        }
+    }
 }
 
 async fn record_current_app_version(pool: &Pool<Sqlite>) -> crate::Result<()> {
