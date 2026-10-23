@@ -49,7 +49,7 @@
 		</span>
 
 		<template v-if="ctx.flowType === 'instance'">
-			<div class="flex flex-col gap-3">
+			<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
 				<BigOptionButton
 					:icon="BoxesIcon"
 					:title="formatMessage(messages.customSetupTitle)"
@@ -78,7 +78,7 @@
 		</template>
 
 		<template v-else>
-			<div class="flex flex-col gap-3">
+			<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
 				<BigOptionButton
 					:icon="CompassIcon"
 					:title="formatMessage(messages.modpackBaseTitle)"
@@ -119,7 +119,7 @@ import {
 	UploadIcon,
 } from '@modrinth/assets'
 import { commonMessages, defineMessages, useVIntl } from '@modrinth/ui'
-import { computed, defineAsyncComponent, h, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, h, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { useDebugLogger } from '#ui/composables/debug-logger'
 
@@ -267,13 +267,13 @@ async function triggerFileInput() {
 	proceedWithModpack()
 }
 
-async function search(query: string) {
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+let searchRequestId = 0
+
+async function search(query: string, requestId: number) {
 	try {
-		if (!query.trim()) {
-			ctx.projectSearchOptions.value = []
-			return
-		}
 		const results = await ctx.searchProjects(query.trim(), 10)
+		if (requestId !== searchRequestId) return
 
 		ctx.projectSearchHits.value = {}
 		for (const hit of results.hits) {
@@ -300,24 +300,39 @@ async function search(query: string) {
 			),
 		}))
 	} catch (error) {
+		if (requestId !== searchRequestId) return
 		debug('project search failed:', error)
 		ctx.projectSearchOptions.value = []
 	} finally {
-		searchLoading.value = false
+		if (requestId === searchRequestId) searchLoading.value = false
 	}
 }
 
-async function handleSearch(query: string) {
+function handleSearch(query: string) {
+	clearTimeout(searchTimer)
+	const requestId = ++searchRequestId
+
+	if (!query.trim()) {
+		ctx.projectSearchOptions.value = []
+		ctx.projectSearchHits.value = {}
+		searchLoading.value = false
+		return
+	}
+
 	searchLoading.value = true
-	await search(query)
+	searchTimer = setTimeout(() => void search(query, requestId), 250)
 }
 
 onMounted(() => {
 	ctx.projectSearchProjectId.value = undefined
-	search('')
 	setTimeout(() => {
 		projectSearchCombobox.value?.$el.querySelector('input')?.focus()
 	}, 150)
+})
+
+onUnmounted(() => {
+	clearTimeout(searchTimer)
+	searchRequestId++
 })
 
 watch(

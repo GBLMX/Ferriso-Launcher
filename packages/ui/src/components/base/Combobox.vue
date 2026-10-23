@@ -120,7 +120,7 @@
 						<div
 							ref="optionsContainerRef"
 							class="overflow-y-auto"
-							:style="{ maxHeight: `${maxHeight}px` }"
+							:style="{ maxHeight: `${optionsMaxHeight}px` }"
 							data-overlayscrollbars-viewport
 						>
 							<div ref="optionsListRef" class="flex flex-col">
@@ -385,6 +385,7 @@ const dropdownStyle = ref({
 	width: '0px',
 	minWidth: '0px',
 })
+const optionsMaxHeight = ref(props.maxHeight)
 
 const openDirection = ref<'down' | 'up'>('down')
 
@@ -576,10 +577,40 @@ async function updateDropdownPosition() {
 		height: dropdownRef.value.offsetHeight,
 	}
 	const viewport = getViewportRect()
+	const viewportTop = viewport.offsetTop + DROPDOWN_VIEWPORT_MARGIN
+	const viewportBottom = viewport.offsetTop + viewport.height - DROPDOWN_VIEWPORT_MARGIN
+	const spaceAbove = triggerRect.top - DROPDOWN_GAP - viewportTop
+	const spaceBelow = viewportBottom - triggerRect.bottom - DROPDOWN_GAP
 
-	const direction = determineOpenDirection(triggerRect, dropdownRect, viewport)
-	const top = calculateVerticalPosition(triggerRect, dropdownRect, direction, viewport)
-	const left = calculateHorizontalPosition(triggerRect, dropdownRect, viewport)
+	let direction = determineOpenDirection(triggerRect, dropdownRect, viewport)
+	let availableSpace = direction === 'up' ? spaceAbove : spaceBelow
+
+	// If the preferred side cannot show a useful list, use the roomier side.
+	const nonOptionHeight = Math.max(
+		0,
+		dropdownRect.height - (optionsContainerRef.value?.offsetHeight ?? 0),
+	)
+	if (availableSpace < nonOptionHeight + 96) {
+		const alternate = direction === 'up' ? spaceBelow : spaceAbove
+		if (alternate > availableSpace) {
+			direction = direction === 'up' ? 'down' : 'up'
+			availableSpace = alternate
+		}
+	}
+
+	optionsMaxHeight.value = Math.max(
+		96,
+		Math.min(props.maxHeight, Math.floor(availableSpace - nonOptionHeight)),
+	)
+
+	await nextTick()
+
+	const clampedRect = {
+		width: dropdownRef.value.offsetWidth,
+		height: dropdownRef.value.offsetHeight,
+	}
+	const top = calculateVerticalPosition(triggerRect, clampedRect, direction, viewport)
+	const left = calculateHorizontalPosition(triggerRect, clampedRect, viewport)
 
 	dropdownStyle.value = {
 		top: `${top}px`,
@@ -589,6 +620,7 @@ async function updateDropdownPosition() {
 	}
 
 	openDirection.value = direction
+	updateOptionsOverlayScrollbars()
 }
 
 async function initializeOptionsOverlayScrollbars() {
@@ -992,8 +1024,10 @@ watch(
 
 watch(
 	() => props.maxHeight,
-	() => {
+	(value) => {
+		optionsMaxHeight.value = value
 		if (isOpen.value) {
+			updateDropdownPosition()
 			updateOptionsOverlayScrollbars()
 		}
 	},

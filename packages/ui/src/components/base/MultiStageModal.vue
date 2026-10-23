@@ -2,7 +2,7 @@
 	<NewModal
 		ref="modal"
 		:scrollable="true"
-		max-content-height="72vh"
+		max-content-height="max(12rem, min(72vh, calc(100dvh - 12rem)))"
 		:on-hide="onModalHide"
 		:closable="true"
 		:close-on-click-outside="closeOnClickOutside"
