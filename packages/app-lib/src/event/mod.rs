@@ -70,6 +70,14 @@ impl EventState {
             .clone()
     }
 
+    /// Returns the event hub if backend initialization has completed.
+    ///
+    /// Native frontends call this before subscribing so an actor that has not
+    /// booted yet does not panic on a frontend refresh.
+    pub fn get_if_initialized() -> Option<Arc<Self>> {
+        EVENT_STATE.get().cloned()
+    }
+
     pub fn send(&self, event: AppEvent) -> crate::Result<()> {
         #[cfg(feature = "tauri")]
         {

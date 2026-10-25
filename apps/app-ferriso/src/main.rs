@@ -5,10 +5,14 @@
 
 mod accessibility;
 mod app;
+mod backend;
 mod config;
+mod curseforge;
 mod gui;
 mod i18n;
+mod icons;
 mod skin3d;
+mod source;
 mod update;
 
 use app::{FerrisoApp, Page};
@@ -48,27 +52,6 @@ fn startup() -> (Page, Option<String>, Option<String>, Option<String>) {
     (page, query, instance, project)
 }
 
-fn startup_settings() -> Option<theseus::data::Settings> {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("could not start settings preload runtime: {error}");
-            return None;
-        }
-    };
-    match runtime.block_on(theseus::settings::get_startup(app::APP_IDENTIFIER))
-    {
-        Ok(settings) => Some(settings),
-        Err(error) => {
-            eprintln!("could not preload settings: {error}");
-            None
-        }
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = match AppConfig::load() {
         Ok(config) => config.sanitized(),
@@ -78,12 +61,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let (page, query, instance, project) = startup();
-    theseus::start_logger(app::APP_IDENTIFIER);
+    theseus::start_logger(backend::APP_IDENTIFIER);
     i18n::set_locale(&i18n::system_locale());
-    let startup_settings = startup_settings();
-    if let Some(settings) = startup_settings.as_ref() {
-        i18n::set_locale(&settings.locale);
-    }
+    let startup_settings = match backend::startup_settings() {
+        Ok(settings) => {
+            i18n::set_locale(&settings.locale);
+            Some(settings)
+        }
+        Err(error) => {
+            eprintln!("could not preload settings: {error}");
+            None
+        }
+    };
     let mut app = if let Some(project) = project {
         FerrisoApp::with_project(project)
     } else if let Some(instance) = instance {
@@ -96,7 +85,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(settings) = startup_settings {
         app = app.with_initial_settings(settings);
     }
-    let app = app.with_update_channel(config.update.channel);
+    let app = app
+        .with_update_channel(config.update.channel)
+        .with_curseforge(config.curseforge.api_key().map(str::to_string));
 
     ferriso_gui::run(
         app,

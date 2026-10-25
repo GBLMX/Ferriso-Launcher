@@ -17,6 +17,7 @@ pub const APP: &str = "ferriso-launcher";
 pub struct AppConfig {
     pub gui: GuiConfig,
     pub update: UpdateConfig,
+    pub curseforge: CurseForgeConfig,
 }
 
 impl AppConfig {
@@ -68,6 +69,34 @@ impl GuiConfig {
     }
 }
 
+/// Official CurseForge API settings.
+///
+/// The key is read from the local layered config or
+/// `FERRISO_LAUNCHER__CURSEFORGE__API_KEY`; it is never built into the binary.
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CurseForgeConfig {
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for CurseForgeConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CurseForgeConfig")
+            .field("api_key", &self.api_key().map(|_| "<configured>"))
+            .finish()
+    }
+}
+
+impl CurseForgeConfig {
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+    }
+}
+
 /// Native update channel selection.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -80,5 +109,20 @@ impl Default for UpdateConfig {
         Self {
             channel: Channel::Stable,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_output_never_contains_the_curseforge_key() {
+        let config = CurseForgeConfig {
+            api_key: Some("super-secret".into()),
+        };
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("super-secret"));
+        assert!(rendered.contains("<configured>"));
     }
 }

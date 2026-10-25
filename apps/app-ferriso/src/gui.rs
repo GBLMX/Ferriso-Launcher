@@ -12,9 +12,10 @@ use ferriso_gui::iced::{
     Radians, Shadow, Theme, Vector,
     gradient::Linear,
     keyboard, mouse, time,
+    widget::text_input as text_input_module,
     widget::{
         Space, Stack, button, column, container, image, mouse_area, pick_list,
-        progress_bar, row, scrollable, text, text_input,
+        progress_bar, row, scrollable,
     },
 };
 use ferriso_gui::{Message as GuiMessage, Renderer};
@@ -31,9 +32,53 @@ use crate::app::{
     SkinTab, VersionPicker, ViewModel, WorldArt, WorldForm, WorldFormKind,
     WorldRow,
 };
+use crate::curseforge;
 use crate::i18n::{self, t};
+use crate::icons::{IconKind, icon};
+use crate::source::{ProjectRef, ProjectSource};
 
 type Msg = GuiMessage<ViewModel, Message>;
+
+#[cfg(target_os = "linux")]
+const UI_FONT: iced::Font = iced::Font::with_name("Noto Sans CJK SC");
+#[cfg(target_os = "windows")]
+const UI_FONT: iced::Font = iced::Font::with_name("Microsoft YaHei UI");
+#[cfg(target_os = "macos")]
+const UI_FONT: iced::Font = iced::Font::with_name("PingFang SC");
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
+)))]
+const UI_FONT: iced::Font = iced::Font::DEFAULT;
+
+fn text<'a>(
+    content: impl iced::widget::text::IntoFragment<'a>,
+) -> iced::widget::Text<'a> {
+    iced::widget::text(content).font(UI_FONT)
+}
+
+fn text_input<'a>(
+    placeholder: &str,
+    value: &str,
+) -> iced::widget::TextInput<'a, Msg> {
+    iced::widget::text_input(placeholder, value).font(UI_FONT)
+}
+
+fn icon_label<'a>(
+    kind: IconKind,
+    label: &'a str,
+    color: Color,
+    size: f32,
+) -> Element<'a, Msg> {
+    row![
+        icon(kind, size, color),
+        text(t(label)).size(size * 0.86).color(color)
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .into()
+}
 
 const fn rgba(red: u8, green: u8, blue: u8, alpha: u8) -> Color {
     Color::from_rgba8(red, green, blue, alpha as f32 / 255.0)
@@ -540,7 +585,9 @@ enum Shortcut {
     Library,
     Account,
     Skins,
+    Hosting,
     Settings,
+    Create,
     Refresh,
     Quit,
 }
@@ -572,6 +619,8 @@ impl FerrisoGui {
             ("Ctrl+4", Shortcut::Account),
             ("Ctrl+5", Shortcut::Skins),
             ("Ctrl+6", Shortcut::Settings),
+            ("Ctrl+7", Shortcut::Hosting),
+            ("Ctrl+n", Shortcut::Create),
             ("Ctrl+r", Shortcut::Refresh),
             ("Ctrl+q", Shortcut::Quit),
         ] {
@@ -684,21 +733,6 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
                 if exit_open || create_open {
                     return None;
                 }
-                if modifiers.contains(keyboard::Modifiers::CTRL)
-                    && let keyboard::Key::Character(character) = &key
-                {
-                    match character.as_str() {
-                        "7" => {
-                            return Some(Msg::User(Message::Navigate(
-                                Page::Hosting,
-                            )));
-                        }
-                        "n" | "N" => {
-                            return Some(Msg::User(Message::OpenCreate));
-                        }
-                        _ => {}
-                    }
-                }
                 let chord = ferriso_gui::keymap::chord(&key, modifiers)?;
                 match keymap.resolve(&chord).copied()? {
                     Shortcut::Home => {
@@ -716,30 +750,18 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
                     Shortcut::Skins => {
                         Some(Msg::User(Message::Navigate(Page::Skins)))
                     }
+                    Shortcut::Hosting => {
+                        Some(Msg::User(Message::Navigate(Page::Hosting)))
+                    }
                     Shortcut::Settings => {
                         Some(Msg::User(Message::Navigate(Page::Settings)))
                     }
+                    Shortcut::Create => Some(Msg::User(Message::OpenCreate)),
                     Shortcut::Refresh => Some(Msg::User(Message::Refresh)),
                     Shortcut::Quit => Some(Msg::Closed),
                 }
             });
 
-        let jobs = time::every(Duration::from_secs(1))
-            .map(|_| Msg::User(Message::PollJobs));
-        let processes = time::every(Duration::from_secs(1))
-            .map(|_| Msg::User(Message::PollProcesses));
-        let ambience = time::every(Duration::from_millis(90))
-            .map(|_| Msg::User(Message::AnimationTick));
-
-        let updates = time::every(Duration::from_secs(300))
-            .map(|_| Msg::User(Message::CheckUpdates));
-        let hosting =
-            if view.page == Page::Hosting && view.modrinth_account.is_some() {
-                time::every(Duration::from_secs(60))
-                    .map(|_| Msg::User(Message::HostingRefresh))
-            } else {
-                iced::Subscription::none()
-            };
         let system = iced::system::theme_changes().map(|mode| {
             Msg::User(Message::SystemThemeChanged(
                 mode == iced::theme::Mode::Light,
@@ -748,16 +770,7 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
         let accessibility =
             time::every(Duration::from_millis(120)).map(|_| Msg::Local(()));
 
-        iced::Subscription::batch([
-            keys,
-            jobs,
-            processes,
-            ambience,
-            updates,
-            hosting,
-            system,
-            accessibility,
-        ])
+        iced::Subscription::batch([keys, system, accessibility])
     }
 
     fn update(&mut self, _local: (), _view: &ViewModel) -> iced::Task<Msg> {
@@ -820,6 +833,18 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
     }
 }
 
+fn page_icon(page: Page) -> IconKind {
+    match page {
+        Page::Home => IconKind::Home,
+        Page::Browse | Page::Project => IconKind::Browse,
+        Page::Library | Page::Instance => IconKind::Library,
+        Page::Account => IconKind::Account,
+        Page::Skins => IconKind::Skins,
+        Page::Hosting => IconKind::Hosting,
+        Page::Settings => IconKind::Settings,
+    }
+}
+
 fn sidebar(view: &ViewModel) -> Element<'_, Msg> {
     let active_page = match view.page {
         Page::Instance => Page::Library,
@@ -832,18 +857,26 @@ fn sidebar(view: &ViewModel) -> Element<'_, Msg> {
         nav = nav.push(
             button(
                 row![
-                    text(if selected { "●" } else { "○" })
-                        .size(9)
-                        .color(if selected { accent_c() } else { muted_c() }),
+                    icon(
+                        page_icon(page),
+                        14.0,
+                        if selected { accent_c() } else { muted_c() },
+                    ),
                     text(t(page.label())).size(14).color(if selected {
                         fg()
                     } else {
                         muted_c()
                     }),
                     Space::new().width(Length::Fill),
-                    text(if selected { "›" } else { "" })
-                        .size(15)
-                        .color(accent_c()),
+                    if selected {
+                        Element::from(icon(
+                            IconKind::ChevronRight,
+                            11.0,
+                            accent_c(),
+                        ))
+                    } else {
+                        Element::from(Space::new())
+                    },
                 ]
                 .spacing(10)
                 .align_y(Alignment::Center),
@@ -864,9 +897,11 @@ fn sidebar(view: &ViewModel) -> Element<'_, Msg> {
     let avatar_name = active_account.clone();
     let active_jobs = view.jobs.iter().filter(|job| job.active).count();
     let live_dot = || {
-        text(t("●"))
-            .size(9)
-            .color(with_alpha(accent_c(), pulse_alpha(view.phase, 120.0)))
+        icon(
+            IconKind::Dot,
+            8.0,
+            with_alpha(accent_c(), pulse_alpha(view.phase, 120.0)),
+        )
     };
 
     container(
@@ -950,11 +985,11 @@ fn top_bar(view: &ViewModel) -> Element<'_, Msg> {
         Space::new().width(Length::Fill),
         container(
             row![
-                text(t("●")).size(8).color(if error_c {
-                    danger_c()
-                } else {
-                    accent_c()
-                }),
+                icon(
+                    IconKind::Dot,
+                    8.0,
+                    if error_c { danger_c() } else { accent_c() },
+                ),
                 text(t(if error_c { "attention" } else { "live" }))
                     .size(10)
                     .color(status_color),
@@ -964,7 +999,7 @@ fn top_bar(view: &ViewModel) -> Element<'_, Msg> {
         )
         .padding([5, 9])
         .style(glass_chip_style),
-        button(text(t("↻  Refresh")).size(11).color(muted_c()))
+        button(icon_label(IconKind::Refresh, "Refresh", muted_c(), 12.0))
             .padding([7, 12])
             .on_press(Msg::User(Message::Refresh))
             .style(ghost_style),
@@ -987,14 +1022,19 @@ fn top_bar(view: &ViewModel) -> Element<'_, Msg> {
                     text(format!("{} {}", t("Update"), update.version))
                         .size(10)
                         .color(ink_c()),
-                    button(text(t("Download")).size(9).color(ink_c()))
-                        .padding([3, 7])
-                        .on_press(Msg::User(Message::OpenUrl(
-                            update.install_url.clone(),
-                        )))
-                        .style(ghost_style),
-                    button(text("×").size(11).color(ink_c()))
-                        .padding([1, 5])
+                    button(icon_label(
+                        IconKind::Download,
+                        "Download",
+                        ink_c(),
+                        11.0
+                    ))
+                    .padding([3, 7])
+                    .on_press(Msg::User(Message::OpenUrl(
+                        update.install_url.clone(),
+                    )))
+                    .style(ghost_style),
+                    button(icon(IconKind::Close, 11.0, ink_c()))
+                        .padding([3, 6])
                         .on_press(Msg::User(Message::DismissUpdate))
                         .style(ghost_style),
                 ]
@@ -1342,7 +1382,7 @@ fn home(view: &ViewModel) -> Element<'_, Msg> {
                     .color(muted_c()),
                     Space::new().height(10),
                     row![
-                        button(text(t("New instance")).size(13).color(ink_c()))
+                        button(icon_label(IconKind::Plus, "New instance", ink_c(), 14.0))
                             .padding([9, 18])
                             .on_press(Msg::User(Message::ToggleCreate))
                             .style(primary_style),
@@ -1578,7 +1618,7 @@ fn library(view: &ViewModel) -> Element<'_, Msg> {
             .padding([9, 14])
             .on_press(Msg::User(Message::BeginImport))
             .style(ghost_style),
-        button(text(t("+  New instance")).size(12).color(ink_c()))
+        button(icon_label(IconKind::Plus, "New instance", ink_c(), 13.0))
             .padding([9, 16])
             .on_press(Msg::User(Message::ToggleCreate))
             .style(primary_style),
@@ -1995,7 +2035,7 @@ fn create_header(
     show_back: bool,
 ) -> Element<'static, Msg> {
     let back: Element<'static, Msg> = if show_back {
-        button(text(t("← Back")).size(10).color(muted_c()))
+        button(icon_label(IconKind::Back, "Back", muted_c(), 12.0))
             .padding([5, 9])
             .on_press(Msg::User(Message::CreateStep(CreateStage::Choose)))
             .style(ghost_style)
@@ -2184,6 +2224,7 @@ fn create_version_picker(view: &ViewModel) -> Element<'_, Msg> {
         )
         .menu_height(Length::Fixed(260.0))
         .text_size(11)
+        .font(UI_FONT)
         .padding([8, 10])
         .width(Length::Fill)
         .into()
@@ -2255,6 +2296,7 @@ fn create_loader_version_picker(view: &ViewModel) -> Element<'_, Msg> {
             })
             .menu_height(Length::Fixed(260.0))
             .text_size(11)
+            .font(UI_FONT)
             .padding([8, 10])
             .width(Length::Fill),
         )
@@ -2262,14 +2304,37 @@ fn create_loader_version_picker(view: &ViewModel) -> Element<'_, Msg> {
 }
 
 fn browse(view: &ViewModel) -> Element<'_, Msg> {
+    let mut sources = row![].spacing(6);
+    for source in ProjectSource::ALL {
+        let selected = view.browse.source == source;
+        sources = sources.push(
+            button(text(source.label()).size(11).color(if selected {
+                accent_c()
+            } else {
+                fg()
+            }))
+            .padding([5, 10])
+            .on_press(Msg::User(Message::BrowseSourceChanged(source)))
+            .style(nav_style(selected, view.phase)),
+        );
+    }
+
+    let placeholder = format!(
+        "{}…",
+        t(if view.browse.source == ProjectSource::CurseForge {
+            "Search CurseForge"
+        } else {
+            "Search Modrinth"
+        })
+    );
     let search = row![
-        text_input(t("Search Modrinth…"), &view.browse.query)
+        text_input(&placeholder, &view.browse.query)
             .padding(9)
             .style(text_input_style)
             .width(Length::Fill)
             .on_input(|value| Msg::User(Message::BrowseQueryChanged(value)))
             .on_submit(Msg::User(Message::BrowseSearch)),
-        button(text(t("Search")).size(12).color(ink_c()))
+        button(icon_label(IconKind::Search, "Search", ink_c(), 13.0))
             .padding([8, 14])
             .on_press(Msg::User(Message::BrowseSearch))
             .style(primary_style),
@@ -2302,6 +2367,7 @@ fn browse(view: &ViewModel) -> Element<'_, Msg> {
                 |sort| Msg::User(Message::BrowseSortChanged(sort)),
             )
             .text_size(10)
+            .font(UI_FONT)
             .padding([5, 8])
             .width(Length::Fixed(150.0)),
         );
@@ -2311,9 +2377,13 @@ fn browse(view: &ViewModel) -> Element<'_, Msg> {
             column![
                 text(t("DISCOVER")).size(9).color(accent_c()),
                 text(t("Find your next project")).size(25).color(fg()),
-                text(t("Search Modrinth and install it in one click."))
-                    .size(11)
-                    .color(muted_c()),
+                text(format!(
+                    "{}: {}",
+                    t("Source"),
+                    view.browse.source.label()
+                ))
+                .size(11)
+                .color(muted_c()),
             ]
             .spacing(2)
             .width(Length::Fill),
@@ -2330,14 +2400,22 @@ fn browse(view: &ViewModel) -> Element<'_, Msg> {
             .style(glass_chip_style),
         ]
         .align_y(Alignment::Center),
+        sources,
         search,
         filters,
     ]
     .spacing(11);
 
     if view.browse.loading {
-        body =
-            body.push(text(t("Searching Modrinth…")).size(12).color(muted_c()));
+        body = body.push(
+            text(format!(
+                "{} {}…",
+                t("Searching"),
+                view.browse.source.label()
+            ))
+            .size(12)
+            .color(muted_c()),
+        );
     } else if let Some(error_c) = &view.browse.error {
         body = body.push(text(error_c).size(12).color(danger_c()));
     } else if view.browse.results.is_empty() {
@@ -2358,13 +2436,18 @@ fn project_row<'a>(
     project: &'a ProjectView,
     view: &'a ViewModel,
 ) -> Element<'a, Msg> {
-    let install_label = t(if project.kind == ProjectKind::Modpack {
-        "Install modpack"
+    let install_label = if project.source == ProjectSource::CurseForge {
+        t("Open on CurseForge")
     } else {
-        "Add to instance"
-    });
-    let can_install =
-        project.kind == ProjectKind::Modpack || view.selected.is_some();
+        t(if project.kind == ProjectKind::Modpack {
+            "Install modpack"
+        } else {
+            "Add to instance"
+        })
+    };
+    let can_install = project.source == ProjectSource::CurseForge
+        || project.kind == ProjectKind::Modpack
+        || view.selected.is_some();
     let install = if can_install {
         button(text(install_label).size(10).color(ink_c()))
             .padding([7, 12])
@@ -2405,9 +2488,10 @@ fn project_row<'a>(
             row![
                 button(text(t("Open page")).size(10).color(muted_c()))
                     .padding([7, 10])
-                    .on_press(Msg::User(Message::OpenProject(
-                        project.id.clone(),
-                    )))
+                    .on_press(Msg::User(Message::OpenProject(ProjectRef::new(
+                        project.source,
+                        project.id.clone()
+                    ),)))
                     .style(ghost_style),
                 install,
             ]
@@ -2442,7 +2526,7 @@ fn project_page(view: &ViewModel) -> Element<'_, Msg> {
         .into();
     };
 
-    let back = button(text(t("← Back")).size(10).color(muted_c()))
+    let back = button(icon_label(IconKind::Back, "Back", muted_c(), 12.0))
         .padding([5, 9])
         .on_press(Msg::User(Message::Back))
         .style(ghost_style);
@@ -2475,14 +2559,31 @@ fn project_page(view: &ViewModel) -> Element<'_, Msg> {
         .into();
     };
 
-    let external =
-        button(text(t("View on Modrinth")).size(10).color(muted_c()))
-            .padding([6, 10])
-            .on_press(Msg::User(Message::OpenUrl(format!(
-                "https://modrinth.com/project/{}",
-                project.slug
-            ))))
-            .style(ghost_style);
+    let external_url = if project.source == ProjectSource::CurseForge {
+        format!(
+            "https://www.curseforge.com/minecraft/{}/{}",
+            curseforge::web_segment(project.kind),
+            if project.slug.trim().is_empty() {
+                &project.id
+            } else {
+                &project.slug
+            }
+        )
+    } else {
+        format!("https://modrinth.com/project/{}", project.slug)
+    };
+    let external = button(
+        text(t(if project.source == ProjectSource::CurseForge {
+            "View on CurseForge"
+        } else {
+            "View on Modrinth"
+        }))
+        .size(10)
+        .color(muted_c()),
+    )
+    .padding([6, 10])
+    .on_press(Msg::User(Message::OpenUrl(external_url)))
+    .style(ghost_style);
 
     let header = container(
         row![
@@ -2579,7 +2680,9 @@ fn project_page(view: &ViewModel) -> Element<'_, Msg> {
     );
 
     let mut targets = row![].spacing(5);
-    if project.kind != ProjectKind::Modpack {
+    if project.source == ProjectSource::Modrinth
+        && project.kind != ProjectKind::Modpack
+    {
         for instance in view.instances.iter().take(12) {
             let selected =
                 page.selected_instance.as_deref() == Some(instance.id.as_str());
@@ -2647,6 +2750,8 @@ fn project_page(view: &ViewModel) -> Element<'_, Msg> {
 
     let install_label = if page.installing {
         t("Installing…")
+    } else if project.source == ProjectSource::CurseForge {
+        t("Open on CurseForge")
     } else if project.kind == ProjectKind::Modpack {
         t("Install modpack")
     } else {
@@ -2654,7 +2759,8 @@ fn project_page(view: &ViewModel) -> Element<'_, Msg> {
     };
     let can_install = !page.installing
         && page.selected_version.is_some()
-        && (project.kind == ProjectKind::Modpack
+        && (project.source == ProjectSource::CurseForge
+            || project.kind == ProjectKind::Modpack
             || page.selected_instance.is_some());
     let install_button: Element<'_, Msg> = if can_install {
         button(text(install_label).size(11).color(ink_c()))
@@ -2671,9 +2777,13 @@ fn project_page(view: &ViewModel) -> Element<'_, Msg> {
 
     let mut right = column![
         text(t("Install")).size(15).color(fg()),
-        text(t("Select a version and an instance."))
-            .size(9)
-            .color(muted_c()),
+        text(t(if project.source == ProjectSource::CurseForge {
+            "Select a file; installation continues on CurseForge."
+        } else {
+            "Select a version and an instance."
+        }))
+        .size(9)
+        .color(muted_c()),
         targets,
         versions,
         install_button,
@@ -3118,7 +3228,7 @@ fn instance_page(view: &ViewModel) -> Element<'_, Msg> {
     };
 
     let header = row![
-        button(text(t("← Library")).size(10).color(muted_c()))
+        button(icon_label(IconKind::Back, "Library", muted_c(), 12.0))
             .padding([6, 10])
             .on_press(Msg::User(Message::Back))
             .style(ghost_style),
@@ -3302,7 +3412,10 @@ fn detail_overview<'a>(
                         )
                         .padding([2, 6])
                         .on_press(Msg::User(Message::OpenProject(
-                            modpack.project_id.clone(),
+                            ProjectRef::new(
+                                ProjectSource::Modrinth,
+                                modpack.project_id.clone(),
+                            ),
                         )))
                         .style(ghost_style),
                     ]
@@ -3862,9 +3975,15 @@ fn edit_groups<'a>(
         chips = chips.push(
             button(
                 row![
-                    text(if selected { "✓" } else { "○" })
-                        .size(10)
-                        .color(if selected { accent_c() } else { muted_c() }),
+                    icon(
+                        if selected {
+                            IconKind::Check
+                        } else {
+                            IconKind::Dot
+                        },
+                        11.0,
+                        if selected { accent_c() } else { muted_c() },
+                    ),
                     text(&group.name).size(10).color(fg()),
                 ]
                 .spacing(5),
@@ -5092,7 +5211,7 @@ fn cape_tile<'a>(
                 .into()
         })
         .unwrap_or_else(|| {
-            container(text(t("×")).size(16).color(muted_c()))
+            container(icon(IconKind::Close, 14.0, muted_c()))
                 .center(Length::Fixed(20.0))
                 .height(Length::Fixed(32.0))
                 .into()
@@ -5260,6 +5379,7 @@ fn language_row(locale: &str) -> Element<'static, Msg> {
             )))
         })
         .text_size(11)
+        .font(UI_FONT)
         .padding([6, 10])
         .width(Length::Fixed(230.0)),
     ]
@@ -5688,10 +5808,10 @@ fn settings(view: &ViewModel) -> Element<'_, Msg> {
 
 fn text_input_style(
     _theme: &Theme,
-    status: text_input::Status,
-) -> text_input::Style {
-    let focused = matches!(status, text_input::Status::Focused { .. });
-    text_input::Style {
+    status: text_input_module::Status,
+) -> text_input_module::Style {
+    let focused = matches!(status, text_input_module::Status::Focused { .. });
+    text_input_module::Style {
         background: Background::Color(if focused {
             palette().input_focus
         } else {

@@ -9,16 +9,20 @@ use std::{
     future::Future,
     path::{Component, Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
+use crate::backend;
+use crate::curseforge::{self, CurseForgeClient};
 use crate::skin3d;
+use crate::source::{ProjectRef, ProjectSource};
 use crate::update::{self, Channel, UpdateInfo, VERSION};
 use base64::Engine as _;
 use bytes::Bytes;
 use either::Either;
-use ferriso_core::{App, Command};
+use ferriso_core::{App, Command, Subscription};
+use futures::StreamExt;
 use image::{
     ExtendedColorType, ImageEncoder, Rgba, RgbaImage, codecs::png::PngEncoder,
 };
@@ -44,47 +48,14 @@ use theseus::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-/// The same identifier used by the Tauri app, so the native frontend reads the
-/// existing database, instances, and account store.
-pub const APP_IDENTIFIER: &str = "ModrinthApp";
-
-/// Backend events are pushed by theseus and drained on the animation tick, so
-/// progress bars and process state do not depend on one-second polling alone.
-static EVENT_QUEUE: OnceLock<Mutex<VecDeque<theseus::AppEvent>>> =
-    OnceLock::new();
-static EVENT_LISTENER: OnceLock<()> = OnceLock::new();
-
-fn start_event_listener() {
-    EVENT_LISTENER.get_or_init(|| {
-        let mut receiver = theseus::EventState::get().subscribe();
-        tokio::spawn(async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(event) => {
-                        let queue = EVENT_QUEUE
-                            .get_or_init(|| Mutex::new(VecDeque::new()));
-                        if let Ok(mut queue) = queue.lock() {
-                            if queue.len() >= 2048 {
-                                queue.pop_front();
-                            }
-                            queue.push_back(event);
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(
-                        skipped,
-                    )) => {
-                        eprintln!(
-                            "native event queue lagged; dropped {skipped} events"
-                        );
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        break;
-                    }
-                }
-            }
-        });
-    });
-}
+// Stable subscription identities. Frontends never own these clocks; the actor
+// reconciles them from the current view state.
+const SUB_ANIMATION: u64 = 1;
+const SUB_JOBS: u64 = 2;
+const SUB_PROCESSES: u64 = 3;
+const SUB_UPDATES: u64 = 4;
+const SUB_HOSTING: u64 = 5;
+const SUB_BACKEND_EVENTS: u64 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -214,6 +185,16 @@ impl ProjectKind {
             _ => None,
         }
     }
+
+    fn from_curseforge_class(class_id: u32) -> Option<Self> {
+        match class_id {
+            4471 => Some(Self::Modpack),
+            6 => Some(Self::Mod),
+            12 => Some(Self::ResourcePack),
+            6552 => Some(Self::Shader),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -319,6 +300,7 @@ pub struct FriendView {
 
 #[derive(Clone, Debug)]
 pub struct ProjectView {
+    pub source: ProjectSource,
     pub id: String,
     pub slug: String,
     pub title: String,
@@ -367,6 +349,7 @@ impl ProjectView {
             .map(str::to_string);
 
         Some(Self {
+            source: ProjectSource::Modrinth,
             id,
             slug,
             title,
@@ -379,6 +362,32 @@ impl ProjectView {
             version_id,
         })
     }
+
+    fn from_curseforge(
+        project: curseforge::Project,
+        kind: ProjectKind,
+    ) -> Self {
+        let icon_url = project.logo.as_ref().and_then(|logo| {
+            logo.thumbnail_url.clone().or_else(|| logo.url.clone())
+        });
+        Self {
+            source: ProjectSource::CurseForge,
+            id: project.id.to_string(),
+            slug: project.slug,
+            title: project.name,
+            summary: project.summary,
+            kind,
+            icon_url,
+            icon: None,
+            downloads: project.downloads,
+            author: project
+                .authors
+                .first()
+                .map(|author| author.name.clone())
+                .unwrap_or_else(|| "CurseForge".into()),
+            version_id: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -390,6 +399,7 @@ pub struct GalleryView {
 
 #[derive(Clone, Debug)]
 pub struct ProjectPage {
+    pub source: ProjectSource,
     pub id: String,
     pub loading: bool,
     pub error: Option<String>,
@@ -405,9 +415,10 @@ pub struct ProjectPage {
 }
 
 impl ProjectPage {
-    fn loading(id: String, instance: Option<String>) -> Self {
+    fn loading(project: ProjectRef, instance: Option<String>) -> Self {
         Self {
-            id,
+            source: project.source,
+            id: project.id,
             loading: true,
             error: None,
             project: None,
@@ -434,6 +445,7 @@ impl ProjectPage {
 
 #[derive(Clone, Debug)]
 pub struct BrowseView {
+    pub source: ProjectSource,
     pub query: String,
     pub kind: ProjectKind,
     pub sort: BrowseSort,
@@ -443,9 +455,29 @@ pub struct BrowseView {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowseRequest {
+    pub source: ProjectSource,
+    pub query: String,
+    pub kind: ProjectKind,
+    pub sort: BrowseSort,
+}
+
+impl BrowseView {
+    fn request(&self) -> BrowseRequest {
+        BrowseRequest {
+            source: self.source,
+            query: self.query.clone(),
+            kind: self.kind,
+            sort: self.sort,
+        }
+    }
+}
+
 impl Default for BrowseView {
     fn default() -> Self {
         Self {
+            source: ProjectSource::Modrinth,
             query: String::new(),
             kind: ProjectKind::Modpack,
             sort: BrowseSort::Relevance,
@@ -1134,6 +1166,7 @@ pub struct ViewModel {
 #[derive(Clone)]
 pub enum Message {
     Booted(Result<BootData, String>),
+    BackendEvent(backend::BackendEvent),
     Refresh,
     Refreshed(Result<BootData, String>),
     Navigate(Page),
@@ -1152,13 +1185,14 @@ pub enum Message {
     AccountSet(Result<(), String>),
     RemoveAccount(String),
     AccountRemoved(Result<(), String>),
+    BrowseSourceChanged(ProjectSource),
     BrowseQueryChanged(String),
     BrowseKind(ProjectKind),
     BrowseSortChanged(BrowseSort),
     BrowseSearch,
-    BrowseResults(Result<Vec<ProjectView>, String>),
-    OpenProject(String),
-    ProjectLoaded(String, Result<ProjectPage, String>),
+    BrowseResults(BrowseRequest, Result<Vec<ProjectView>, String>),
+    OpenProject(ProjectRef),
+    ProjectLoaded(ProjectRef, Result<ProjectPage, String>),
     SelectProjectVersion(usize),
     SelectProjectInstance(String),
     InstallProjectVersion,
@@ -1464,6 +1498,7 @@ pub struct FerrisoApp {
     library_form: Option<LibraryForm>,
     edit: Option<InstanceEditForm>,
     delete_confirm: bool,
+    curseforge: CurseForgeClient,
 }
 
 impl FerrisoApp {
@@ -1542,7 +1577,14 @@ impl FerrisoApp {
             library_form: None,
             edit: None,
             delete_confirm: false,
+            curseforge: CurseForgeClient::new(None),
         }
+    }
+
+    #[must_use]
+    pub fn with_curseforge(mut self, api_key: Option<String>) -> Self {
+        self.curseforge = CurseForgeClient::new(api_key);
+        self
     }
 
     pub fn with_page(page: Page) -> Self {
@@ -1566,8 +1608,8 @@ impl FerrisoApp {
 
     pub fn with_project(identifier: impl Into<String>) -> Self {
         let mut app = Self::with_page(Page::Project);
-        let id = identifier.into();
-        app.project = Some(ProjectPage::loading(id.clone(), None));
+        let project = ProjectRef::parse(&identifier.into());
+        app.project = Some(ProjectPage::loading(project, None));
         app.status = "Loading project…".into();
         app
     }
@@ -1885,13 +1927,17 @@ impl FerrisoApp {
     fn load_browse(&mut self) -> Command<Message> {
         self.browse.loading = true;
         self.browse.error = None;
+        let request = self.browse.request();
+        let response_request = request.clone();
         Command::perform(
             search_projects(
-                self.browse.query.clone(),
-                self.browse.kind,
-                self.browse.sort,
+                request.source,
+                self.curseforge.clone(),
+                request.query,
+                request.kind,
+                request.sort,
             ),
-            Message::BrowseResults,
+            move |result| Message::BrowseResults(response_request, result),
         )
     }
 }
@@ -1962,11 +2008,15 @@ impl App for FerrisoApp {
                 if self.page == Page::Project
                     && let Some(page) = &self.project
                 {
-                    let id = page.id.clone();
+                    let project = ProjectRef::new(page.source, page.id.clone());
                     let instance = self.selected.clone();
-                    let message_id = id.clone();
+                    let message_id = project.clone();
                     commands.push(Command::perform(
-                        load_project(id, instance),
+                        load_project(
+                            self.curseforge.clone(),
+                            project,
+                            instance,
+                        ),
                         move |result| {
                             Message::ProjectLoaded(message_id, result)
                         },
@@ -2253,8 +2303,19 @@ impl App for FerrisoApp {
                     Command::none()
                 }
             },
+            Message::BrowseSourceChanged(source) => {
+                if self.browse.source == source {
+                    return Command::none();
+                }
+                self.browse.source = source;
+                self.browse.results.clear();
+                self.browse.loaded = false;
+                self.browse.error = None;
+                self.load_browse()
+            }
             Message::BrowseQueryChanged(query) => {
                 self.browse.query = query;
+                self.browse.loading = false;
                 Command::none()
             }
             Message::BrowseKind(kind) => {
@@ -2268,7 +2329,10 @@ impl App for FerrisoApp {
                 self.load_browse()
             }
             Message::BrowseSearch => self.load_browse(),
-            Message::BrowseResults(result) => {
+            Message::BrowseResults(request, result) => {
+                if request != self.browse.request() {
+                    return Command::none();
+                }
                 self.browse.loading = false;
                 self.browse.loaded = true;
                 match result {
@@ -2283,23 +2347,27 @@ impl App for FerrisoApp {
                 }
                 Command::none()
             }
-            Message::OpenProject(id) => {
+            Message::OpenProject(project) => {
                 self.page = Page::Project;
                 self.project = Some(ProjectPage::loading(
-                    id.clone(),
+                    project.clone(),
                     self.selected.clone(),
                 ));
                 self.status = "Loading project…".into();
-                let message_id = id.clone();
+                let message_id = project.clone();
                 Command::perform(
-                    load_project(id, self.selected.clone()),
+                    load_project(
+                        self.curseforge.clone(),
+                        project,
+                        self.selected.clone(),
+                    ),
                     move |result| Message::ProjectLoaded(message_id, result),
                 )
             }
-            Message::ProjectLoaded(id, result) => {
-                if self.project.as_ref().map(|page| page.id.as_str())
-                    != Some(id.as_str())
-                {
+            Message::ProjectLoaded(project, result) => {
+                if self.project.as_ref().is_none_or(|page| {
+                    page.source != project.source || page.id != project.id
+                }) {
                     return Command::none();
                 }
                 match result {
@@ -2348,6 +2416,21 @@ impl App for FerrisoApp {
                         Some("Select a version to install".into());
                     return Command::none();
                 };
+                if project.source == ProjectSource::CurseForge {
+                    match open_curseforge_page(&project, Some(&version.id)) {
+                        Ok(message) => {
+                            page.install_result = Some(message.clone());
+                            page.install_error = None;
+                            self.status = message;
+                        }
+                        Err(error) => {
+                            page.install_error = Some(error.clone());
+                            page.install_result = None;
+                            self.error = Some(error);
+                        }
+                    }
+                    return Command::none();
+                }
                 if project.kind != ProjectKind::Modpack
                     && page.selected_instance.is_none()
                 {
@@ -2395,6 +2478,19 @@ impl App for FerrisoApp {
                 }
             }
             Message::InstallProject(project) => {
+                if project.source == ProjectSource::CurseForge {
+                    return match open_curseforge_page(&project, None) {
+                        Ok(message) => {
+                            self.status = message;
+                            Command::none()
+                        }
+                        Err(error) => {
+                            self.error = Some(error);
+                            self.status = "Could not open CurseForge".into();
+                            Command::none()
+                        }
+                    };
+                }
                 if project.kind == ProjectKind::Modpack {
                     self.status = format!("Installing {}…", project.title);
                     Command::perform(
@@ -4641,6 +4737,24 @@ impl App for FerrisoApp {
                 }
                 Command::none()
             }
+            Message::BackendEvent(backend::BackendEvent::Event(event)) => {
+                self.handle_backend_event(event)
+            }
+            Message::BackendEvent(backend::BackendEvent::Lagged(skipped)) => {
+                eprintln!(
+                    "backend event stream lagged; dropped {skipped} events"
+                );
+                self.status = "Resyncing launcher state…".into();
+                Command::batch([
+                    Command::perform(load_snapshot(), Message::Refreshed),
+                    Command::perform(load_jobs(), Message::JobsLoaded),
+                    Command::perform(
+                        load_processes(),
+                        Message::ProcessesLoaded,
+                    ),
+                    self.reload_detail(),
+                ])
+            }
             Message::AnimationTick => {
                 if self
                     .settings
@@ -4649,143 +4763,175 @@ impl App for FerrisoApp {
                 {
                     self.phase = (self.phase + 0.07) % std::f32::consts::TAU;
                 }
-                let events: Vec<theseus::AppEvent> = EVENT_QUEUE
-                    .get_or_init(|| Mutex::new(VecDeque::new()))
-                    .lock()
-                    .map(|mut queue| queue.drain(..).collect())
-                    .unwrap_or_default();
-                let mut reload = false;
-                let mut refresh_processes = false;
-                let mut refresh_jobs = false;
-                let mut finished_process: Option<(String, bool)> = None;
-                for event in events {
-                    match event {
-                        theseus::AppEvent::InstallJob(job) => {
-                            let view = JobView::from((*job).clone());
-                            if let Some(existing) = self
-                                .jobs
-                                .iter_mut()
-                                .find(|known| known.id == view.id)
-                            {
-                                *existing = view;
-                            } else {
-                                self.jobs.insert(0, view);
-                            }
-                            refresh_jobs = true;
-                        }
-                        theseus::AppEvent::Process(payload) => {
-                            refresh_processes = true;
-                            if matches!(
-                                payload.event,
-                                theseus::ProcessPayloadType::Finished
-                            ) {
-                                let success =
-                                    process_exit_succeeded(&payload.message);
-                                let instance_name = self
-                                    .instances
-                                    .iter()
-                                    .find(|instance| {
-                                        instance.id == payload.instance_id
-                                    })
-                                    .map(|instance| instance.name.clone())
-                                    .unwrap_or_else(|| {
-                                        payload.instance_id.clone()
-                                    });
-                                self.exit = Some(ProcessExitView {
-                                    instance_id: payload.instance_id.clone(),
-                                    instance_name,
-                                    detail: payload.message.clone(),
-                                    success,
-                                    analyzing: !success,
-                                    analysis: None,
-                                    analysis_error: None,
-                                });
-                                finished_process =
-                                    Some((payload.instance_id, success));
-                            }
-                        }
-                        theseus::AppEvent::Instance(_)
-                        | theseus::AppEvent::InstanceGroupsChanged(_) => {
-                            reload = true;
-                        }
-                        theseus::AppEvent::Warning(payload) => {
-                            self.status = payload.message;
-                            self.error = Some(self.status.clone());
-                        }
-                        theseus::AppEvent::Notification(payload) => {
-                            self.status = payload;
-                        }
-                        theseus::AppEvent::OnboardingChecklist(checklist) => {
-                            self.checklist = Some(checklist);
-                        }
-                        theseus::AppEvent::Log(payload) => {
-                            let line = match payload.event {
-                                theseus::LogEvent::Legacy { message } => {
-                                    message
-                                }
-                                theseus::LogEvent::Log4j(event) => format!(
-                                    "{} [{}] {}: {}",
-                                    event
-                                        .timestamp_millis
-                                        .map(|value| value.to_string())
-                                        .unwrap_or_default(),
-                                    event.thread_name.as_deref().unwrap_or(""),
-                                    event.level.as_deref().unwrap_or("INFO"),
-                                    event.message.as_deref().unwrap_or("")
-                                ),
-                            };
-                            let lines = self
-                                .live_logs
-                                .entry(payload.instance_id)
-                                .or_default();
-                            for line in line.lines() {
-                                lines.push_back(line.to_string());
-                            }
-                            while lines.len() > 400
-                                || lines.iter().map(String::len).sum::<usize>()
-                                    > 96 * 1024
-                            {
-                                lines.pop_front();
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                let mut commands = Vec::new();
-                if reload {
-                    commands.push(Command::perform(
-                        load_snapshot(),
-                        Message::Refreshed,
-                    ));
-                    commands.push(self.reload_detail());
-                }
-                if refresh_processes {
-                    commands.push(Command::perform(
-                        load_processes(),
-                        Message::ProcessesLoaded,
-                    ));
-                }
-                if refresh_jobs {
-                    commands.push(Command::perform(
-                        load_jobs(),
-                        Message::JobsLoaded,
-                    ));
-                }
-                if let Some((instance_id, false)) = finished_process {
-                    commands.push(Command::perform(
-                        analyze_exit(instance_id.clone()),
-                        move |result| {
-                            Message::ExitAnalyzed(instance_id, result)
-                        },
-                    ));
-                }
-                Command::batch(commands)
+                Command::none()
             }
         }
     }
 
+    fn subscriptions(&self) -> Subscription<Self::Message> {
+        if !self.booted {
+            return Subscription::none();
+        }
+
+        let mut subscriptions = Vec::new();
+        if self
+            .settings
+            .as_ref()
+            .is_none_or(|settings| !reduce_motion(settings))
+        {
+            subscriptions.push(Subscription::interval(
+                SUB_ANIMATION,
+                Duration::from_millis(90),
+                Message::AnimationTick,
+            ));
+        }
+        subscriptions.push(Subscription::interval(
+            SUB_JOBS,
+            Duration::from_secs(1),
+            Message::PollJobs,
+        ));
+        subscriptions.push(Subscription::interval(
+            SUB_PROCESSES,
+            Duration::from_secs(1),
+            Message::PollProcesses,
+        ));
+        subscriptions.push(Subscription::interval(
+            SUB_UPDATES,
+            Duration::from_secs(300),
+            Message::CheckUpdates,
+        ));
+        if self.page == Page::Hosting && self.modrinth_account.is_some() {
+            subscriptions.push(Subscription::interval(
+                SUB_HOSTING,
+                Duration::from_secs(60),
+                Message::HostingRefresh,
+            ));
+        }
+        if let Some(events) = backend::event_stream() {
+            subscriptions.push(Subscription::stream(
+                SUB_BACKEND_EVENTS,
+                events.map(Message::BackendEvent),
+            ));
+        }
+
+        Subscription::batch(subscriptions)
+    }
+
     fn view(&self) -> Self::View {
         self.view_model()
+    }
+}
+
+impl FerrisoApp {
+    fn handle_backend_event(
+        &mut self,
+        event: theseus::AppEvent,
+    ) -> Command<Message> {
+        let mut reload = false;
+        let mut refresh_processes = false;
+        let mut refresh_jobs = false;
+        let mut finished_process: Option<(String, bool)> = None;
+        match event {
+            theseus::AppEvent::InstallJob(job) => {
+                let view = JobView::from((*job).clone());
+                if let Some(existing) =
+                    self.jobs.iter_mut().find(|known| known.id == view.id)
+                {
+                    *existing = view;
+                } else {
+                    self.jobs.insert(0, view);
+                }
+                refresh_jobs = true;
+            }
+            theseus::AppEvent::Process(payload) => {
+                refresh_processes = true;
+                if matches!(
+                    payload.event,
+                    theseus::ProcessPayloadType::Finished
+                ) {
+                    let success = process_exit_succeeded(&payload.message);
+                    let instance_name = self
+                        .instances
+                        .iter()
+                        .find(|instance| instance.id == payload.instance_id)
+                        .map(|instance| instance.name.clone())
+                        .unwrap_or_else(|| payload.instance_id.clone());
+                    self.exit = Some(ProcessExitView {
+                        instance_id: payload.instance_id.clone(),
+                        instance_name,
+                        detail: payload.message.clone(),
+                        success,
+                        analyzing: !success,
+                        analysis: None,
+                        analysis_error: None,
+                    });
+                    finished_process = Some((payload.instance_id, success));
+                }
+            }
+            theseus::AppEvent::Instance(_)
+            | theseus::AppEvent::InstanceGroupsChanged(_) => {
+                reload = true;
+            }
+            theseus::AppEvent::Warning(payload) => {
+                self.status = payload.message;
+                self.error = Some(self.status.clone());
+            }
+            theseus::AppEvent::Notification(payload) => {
+                self.status = payload;
+            }
+            theseus::AppEvent::OnboardingChecklist(checklist) => {
+                self.checklist = Some(checklist);
+            }
+            theseus::AppEvent::Log(payload) => {
+                let line = match payload.event {
+                    theseus::LogEvent::Legacy { message } => message,
+                    theseus::LogEvent::Log4j(event) => format!(
+                        "{} [{}] {}: {}",
+                        event
+                            .timestamp_millis
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                        event.thread_name.as_deref().unwrap_or(""),
+                        event.level.as_deref().unwrap_or("INFO"),
+                        event.message.as_deref().unwrap_or("")
+                    ),
+                };
+                let lines =
+                    self.live_logs.entry(payload.instance_id).or_default();
+                for line in line.lines() {
+                    lines.push_back(line.to_string());
+                }
+                while lines.len() > 400
+                    || lines.iter().map(String::len).sum::<usize>() > 96 * 1024
+                {
+                    lines.pop_front();
+                }
+            }
+            _ => {}
+        }
+
+        let mut commands = Vec::new();
+        if reload {
+            commands
+                .push(Command::perform(load_snapshot(), Message::Refreshed));
+            commands.push(self.reload_detail());
+        }
+        if refresh_processes {
+            commands.push(Command::perform(
+                load_processes(),
+                Message::ProcessesLoaded,
+            ));
+        }
+        if refresh_jobs {
+            commands.push(Command::perform(load_jobs(), Message::JobsLoaded));
+        }
+        if let Some((instance_id, false)) = finished_process {
+            commands.push(Command::perform(
+                analyze_exit(instance_id.clone()),
+                move |result| Message::ExitAnalyzed(instance_id, result),
+            ));
+        }
+        Command::batch(commands)
     }
 }
 
@@ -4861,8 +5007,7 @@ async fn load_game_versions() -> Result<Vec<String>, String> {
 
 async fn boot() -> Result<BootData, String> {
     theseus::EventState::init().await.map_err(describe)?;
-    start_event_listener();
-    State::init(APP_IDENTIFIER.to_owned())
+    State::init(backend::APP_IDENTIFIER.to_owned())
         .await
         .map_err(describe)?;
     let mut data = load_snapshot().await?;
@@ -4990,6 +5135,23 @@ async fn load_jobs() -> Result<Vec<JobView>, String> {
 }
 
 async fn search_projects(
+    source: ProjectSource,
+    curseforge: CurseForgeClient,
+    query: String,
+    kind: ProjectKind,
+    sort: BrowseSort,
+) -> Result<Vec<ProjectView>, String> {
+    match source {
+        ProjectSource::Modrinth => {
+            search_modrinth_projects(query, kind, sort).await
+        }
+        ProjectSource::CurseForge => {
+            search_curseforge_projects(curseforge, query, kind, sort).await
+        }
+    }
+}
+
+async fn search_modrinth_projects(
     query: String,
     kind: ProjectKind,
     sort: BrowseSort,
@@ -5033,6 +5195,48 @@ async fn search_projects(
     )
 }
 
+async fn search_curseforge_projects(
+    client: CurseForgeClient,
+    query: String,
+    kind: ProjectKind,
+    sort: BrowseSort,
+) -> Result<Vec<ProjectView>, String> {
+    if !client.available() {
+        return Err(CurseForgeClient::missing_key_message().to_string());
+    }
+    let sort = match sort {
+        BrowseSort::Downloads => curseforge::Sort::Downloads,
+        BrowseSort::Updated | BrowseSort::Newest => curseforge::Sort::Updated,
+        BrowseSort::Relevance | BrowseSort::Follows => {
+            curseforge::Sort::Relevance
+        }
+    };
+    let projects = client
+        .search(&query, curseforge::class_id(kind), sort)
+        .await?
+        .into_iter()
+        .map(|project| ProjectView::from_curseforge(project, kind))
+        .collect::<Vec<_>>();
+    let image_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .ok();
+    Ok(
+        futures::future::join_all(projects.into_iter().map(|mut project| {
+            let image_client = image_client.clone();
+            async move {
+                if let (Some(image_client), Some(url)) =
+                    (image_client, project.icon_url.as_deref())
+                {
+                    project.icon = fetch_project_icon(&image_client, url).await;
+                }
+                project
+            }
+        }))
+        .await,
+    )
+}
+
 async fn fetch_project_icon(
     client: &reqwest::Client,
     url: &str,
@@ -5052,6 +5256,22 @@ async fn fetch_project_icon(
 }
 
 async fn load_project(
+    curseforge: CurseForgeClient,
+    project: ProjectRef,
+    selected_instance: Option<String>,
+) -> Result<ProjectPage, String> {
+    match project.source {
+        ProjectSource::Modrinth => {
+            load_modrinth_project(project.id, selected_instance).await
+        }
+        ProjectSource::CurseForge => {
+            load_curseforge_project(curseforge, project.id, selected_instance)
+                .await
+        }
+    }
+}
+
+async fn load_modrinth_project(
     id: String,
     selected_instance: Option<String>,
 ) -> Result<ProjectPage, String> {
@@ -5146,6 +5366,7 @@ async fn load_project(
         .or_else(|| (!choices.is_empty()).then_some(0));
 
     let view = ProjectView {
+        source: ProjectSource::Modrinth,
         id: project.id,
         slug: project.slug.unwrap_or_default(),
         title: project.title,
@@ -5159,6 +5380,7 @@ async fn load_project(
     };
 
     Ok(ProjectPage {
+        source: ProjectSource::Modrinth,
         id,
         loading: false,
         error: None,
@@ -5174,9 +5396,183 @@ async fn load_project(
     })
 }
 
+async fn load_curseforge_project(
+    client: CurseForgeClient,
+    id: String,
+    selected_instance: Option<String>,
+) -> Result<ProjectPage, String> {
+    if !client.available() {
+        return Err(CurseForgeClient::missing_key_message().to_string());
+    }
+    let project_id = id
+        .parse::<u32>()
+        .map_err(|_| "CurseForge project ID must be numeric".to_string())?;
+    let (project, files) = futures::try_join!(
+        client.project(project_id),
+        client.files(project_id),
+    )?;
+    let description = client.description(project_id).await.unwrap_or_default();
+    let kind = ProjectKind::from_curseforge_class(project.class_id)
+        .ok_or_else(|| "Unsupported CurseForge project type".to_string())?;
+    let image_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .build()
+        .map_err(|error| format!("Could not create image client: {error}"))?;
+    let icon_url = project.logo.as_ref().and_then(|logo| {
+        logo.thumbnail_url.clone().or_else(|| logo.url.clone())
+    });
+    let icon = match icon_url.as_deref() {
+        Some(url) => fetch_project_icon(&image_client, url).await,
+        None => None,
+    };
+    let gallery = futures::future::join_all(
+        project.screenshots.iter().take(8).map(|screenshot| {
+            let image_client = image_client.clone();
+            async move {
+                GalleryView {
+                    title: screenshot.title.clone(),
+                    description: screenshot.description.clone(),
+                    image: fetch_project_icon(&image_client, &screenshot.url)
+                        .await,
+                }
+            }
+        }),
+    )
+    .await;
+
+    let mut choices: Vec<VersionChoice> = files
+        .into_iter()
+        .take(40)
+        .map(|file| VersionChoice {
+            id: file.id.to_string(),
+            number: file.display_name,
+            game_versions: file
+                .game_versions
+                .iter()
+                .filter(|value| looks_like_minecraft_version(value))
+                .cloned()
+                .collect(),
+            loaders: file
+                .game_versions
+                .iter()
+                .filter_map(|value| curseforge_loader(value))
+                .collect(),
+            downloads: file.downloads.min(u32::MAX as u64) as u32,
+        })
+        .collect();
+    let compatibility = if let Some(instance_id) = selected_instance.as_deref()
+    {
+        instance::get(instance_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|metadata| {
+                (
+                    metadata.applied_content_set.game_version,
+                    metadata.applied_content_set.loader.as_str().to_string(),
+                )
+            })
+    } else {
+        None
+    };
+    let selected_version = compatibility
+        .as_ref()
+        .and_then(|(game, loader)| {
+            choices.iter().position(|version| {
+                version.game_versions.iter().any(|value| value == game)
+                    && (kind != ProjectKind::Mod
+                        || version.loaders.iter().any(|value| value == loader))
+            })
+        })
+        .or_else(|| (!choices.is_empty()).then_some(0));
+
+    let view = ProjectView {
+        source: ProjectSource::CurseForge,
+        id: id.clone(),
+        slug: project.slug.clone(),
+        title: project.name.clone(),
+        summary: project.summary.clone(),
+        kind,
+        icon_url,
+        icon,
+        downloads: project.downloads,
+        author: project
+            .authors
+            .first()
+            .map(|author| author.name.clone())
+            .unwrap_or_else(|| "CurseForge".into()),
+        version_id: None,
+    };
+
+    Ok(ProjectPage {
+        source: ProjectSource::CurseForge,
+        id,
+        loading: false,
+        error: None,
+        project: Some(view),
+        body: html_to_text(&description),
+        gallery,
+        versions: std::mem::take(&mut choices),
+        selected_version,
+        selected_instance,
+        installing: false,
+        install_error: None,
+        install_result: None,
+    })
+}
+
+fn looks_like_minecraft_version(value: &str) -> bool {
+    let mut parts = value.split('.');
+    parts.next().is_some_and(|part| !part.is_empty())
+        && parts.all(|part| {
+            !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())
+        })
+}
+
+fn curseforge_loader(value: &str) -> Option<String> {
+    match value.to_ascii_lowercase().as_str() {
+        "forge" => Some("forge".into()),
+        "neoforge" | "neo" => Some("neoforge".into()),
+        "fabric" => Some("fabric".into()),
+        "quilt" => Some("quilt".into()),
+        _ => None,
+    }
+}
+
+fn html_to_text(html: &str) -> String {
+    let mut output = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for character in html.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                output.push(' ');
+            }
+            _ if !in_tag => output.push(character),
+            _ => {}
+        }
+    }
+    output
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 async fn install_modpack(
     project: ProjectView,
 ) -> Result<InstallJobSnapshot, String> {
+    if project.source == ProjectSource::CurseForge {
+        return Err(
+            "CurseForge modpacks install from the official page".to_string()
+        );
+    }
     let version_id = project
         .version_id
         .ok_or_else(|| "This project has no installable version".to_string())?;
@@ -5195,6 +5591,9 @@ async fn install_to_instance(
     instance_id: String,
     project: ProjectView,
 ) -> Result<String, String> {
+    if project.source == ProjectSource::CurseForge {
+        return Err("CurseForge content installs from the official page".into());
+    }
     install_to_instance_version(instance_id, project, None).await
 }
 
@@ -5203,6 +5602,9 @@ async fn install_to_instance_version(
     project: ProjectView,
     pinned_version: Option<String>,
 ) -> Result<String, String> {
+    if project.source == ProjectSource::CurseForge {
+        return Err("CurseForge content installs from the official page".into());
+    }
     let metadata = instance::get(&instance_id)
         .await
         .map_err(describe)?
@@ -5286,11 +5688,45 @@ async fn install_to_instance_version(
     Err(format!("Install of {title} did not complete"))
 }
 
+fn curseforge_page_url(
+    project: &ProjectView,
+    version_id: Option<&str>,
+) -> String {
+    let slug = if project.slug.trim().is_empty() {
+        project.id.as_str()
+    } else {
+        project.slug.as_str()
+    };
+    let mut url = format!(
+        "https://www.curseforge.com/minecraft/{}/{}",
+        curseforge::web_segment(project.kind),
+        urlencoding::encode(slug)
+    );
+    if let Some(version_id) = version_id {
+        url.push_str("/files/");
+        url.push_str(&urlencoding::encode(version_id));
+    }
+    url
+}
+
+fn open_curseforge_page(
+    project: &ProjectView,
+    version_id: Option<&str>,
+) -> Result<String, String> {
+    let url = curseforge_page_url(project, version_id);
+    webbrowser::open(&url)
+        .map_err(|error| format!("Could not open CurseForge: {error}"))?;
+    Ok(format!("Opened CurseForge: {url}"))
+}
+
 async fn install_project_version(
     project: ProjectView,
     version_id: String,
     instance_id: Option<String>,
 ) -> Result<String, String> {
+    if project.source == ProjectSource::CurseForge {
+        return open_curseforge_page(&project, Some(&version_id));
+    }
     if project.kind == ProjectKind::Modpack {
         let location = CreatePackLocation::FromVersionId {
             project_id: project.id,
@@ -7014,13 +7450,80 @@ mod tests {
     use base64::Engine as _;
 
     use super::{
-        BrowseSort, CrashCause, InstanceView, ProjectKind, ProjectView,
-        analyze_log_lines, auth_code_from_path, compose_avatar,
-        create_folder_in, decode_data_icon, delete_entry, extract_invite_id,
-        extract_login_code, process_exit_succeeded, relative_file_path,
-        rename_entry, render_avatar_png, validate_entry_name,
+        BrowseRequest, BrowseSort, CrashCause, FerrisoApp, InstanceView,
+        Message, ProjectKind, ProjectView, analyze_log_lines,
+        auth_code_from_path, compose_avatar, create_folder_in,
+        decode_data_icon, delete_entry, extract_invite_id, extract_login_code,
+        process_exit_succeeded, relative_file_path, rename_entry,
+        render_avatar_png, validate_entry_name,
     };
+    use ferriso_core::App as _;
     use image::{Rgba, RgbaImage};
+
+    use crate::source::ProjectSource;
+
+    #[test]
+    fn actor_clocks_start_only_after_backend_boot() {
+        assert!(FerrisoApp::new().subscriptions().is_empty());
+    }
+
+    #[test]
+    fn editing_the_query_cancels_the_loading_indicator() {
+        let mut app = FerrisoApp::new();
+        app.browse.loading = true;
+        let _ = app.update(Message::BrowseQueryChanged("sodium".into()));
+        assert_eq!(app.browse.query, "sodium");
+        assert!(!app.browse.loading);
+    }
+
+    #[test]
+    fn ignores_a_browse_result_from_the_previous_source() {
+        let mut app = FerrisoApp::new();
+        app.browse.source = ProjectSource::CurseForge;
+        app.browse.loading = true;
+        let stale = BrowseRequest {
+            source: ProjectSource::Modrinth,
+            query: String::new(),
+            kind: ProjectKind::Modpack,
+            sort: BrowseSort::Relevance,
+        };
+
+        let _ = app.update(Message::BrowseResults(stale, Ok(Vec::new())));
+        assert!(app.browse.loading);
+        assert!(!app.browse.loaded);
+        assert!(app.browse.results.is_empty());
+    }
+
+    #[test]
+    fn switching_browse_source_clears_previous_results() {
+        let mut app = FerrisoApp::new();
+        app.browse.loaded = true;
+        app.browse.results = vec![
+            ProjectView::from_hit(&serde_json::json!({
+                "project_id": "AANobbMI",
+                "slug": "sodium",
+                "name": "Sodium",
+                "project_types": ["mod"],
+            }))
+            .expect("valid hit"),
+        ];
+
+        let _ =
+            app.update(Message::BrowseSourceChanged(ProjectSource::CurseForge));
+        assert_eq!(app.browse.source, ProjectSource::CurseForge);
+        assert!(app.browse.results.is_empty());
+        assert!(!app.browse.loaded);
+        assert!(app.browse.loading);
+    }
+
+    #[test]
+    fn backend_notification_reaches_the_actor() {
+        let mut app = FerrisoApp::new();
+        let _ = app.handle_backend_event(theseus::AppEvent::Notification(
+            "backend ready".into(),
+        ));
+        assert_eq!(app.status, "backend ready");
+    }
 
     #[test]
     fn browse_sort_maps_to_modrinth_indexes() {
@@ -7165,6 +7668,7 @@ mod tests {
         });
 
         let project = ProjectView::from_hit(&hit).expect("valid hit");
+        assert_eq!(project.source, ProjectSource::Modrinth);
         assert_eq!(project.id, "AANobbMI");
         assert_eq!(project.slug, "sodium");
         assert_eq!(project.title, "Sodium");

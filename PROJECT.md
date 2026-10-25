@@ -4,12 +4,20 @@
 
 ## 基本信息
 
-- 位置：`E:\Code\modrinth`（Linux 工作区：`/home/wangwenjie/Projects/Ferriso-Launcher`）
+- 位置：`E:\Code\modrinth`（Linux 工作区：`/home/wangwenjie/src/github.com/GBLMX/Ferriso-Launcher`）
 - 上游：`Modrinth/code`（remote `upstream` = `git@github.com:Modrinth/code.git`）
 - Fork：`GBLMX/Ferriso-Launcher`（remote `origin` = `git@github.com:GBLMX/Ferriso-Launcher.git`）
 - 基线：上游 `main` @ 2026-08-25（ZIP 快照导入，`eae097b`，**与上游无共享 git 历史**）
 - 分支：`win-work-20260923` 承载本地快照与 Windows 侧改动，已推送到 `origin`；`origin/main` 保持上游同步，不被本地快照覆盖
 - 许可证：各 package 单独许可，见 `COPYING.md`
+
+## 前后端边界
+
+- `ferriso-core` actor 持有领域状态、定时器、后端事件流和所有状态迁移；前端只发送语义消息并渲染不可变 `ViewModel`。
+- `apps/app-ferriso/src/backend.rs` 只负责启动前设置预读和 Theseus 事件流，不持有 UI 状态。
+- Theseus 持久化设置是启动器设置的唯一来源；`ferriso-launcher.toml` / 环境变量只控制原生窗口和 Ferriso 自身选项。
+- 键盘映射、系统主题探测和无障碍同步属于前端本地状态，不进入 actor。
+- 定时器由 `App::subscriptions` 声明；GUI 不再自行驱动 jobs、processes、updates、hosting 或动画轮询。
 
 ## 同步上游
 

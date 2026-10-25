@@ -17,9 +17,39 @@ pub async fn get() -> crate::Result<Settings> {
 ///
 /// Native frontends use this to seed their first frame, so theme and locale do
 /// not briefly fall back to defaults while the rest of the launcher boots.
+/// This is a read-only read: it does not create directories, back up, migrate,
+/// or otherwise race the real [`State::init`] path.
 #[tracing::instrument]
 pub async fn get_startup(app_identifier: &str) -> crate::Result<Settings> {
-    let pool = crate::state::db::connect(app_identifier).await?;
+    use std::time::Duration;
+
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    let settings_dir =
+        crate::state::DirectoryInfo::initial_settings_dir_path(app_identifier)
+            .ok_or_else(|| {
+                crate::ErrorKind::FSError(
+                    "Could not find valid settings dir".to_string(),
+                )
+            })?;
+    let db_path = settings_dir.join("app.db");
+    if !db_path.is_file() {
+        return Err(crate::ErrorKind::FSError(format!(
+            "Settings database does not exist: {}",
+            db_path.display()
+        ))
+        .into());
+    }
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&db_path)
+                .read_only(true)
+                .busy_timeout(Duration::from_secs(5)),
+        )
+        .await?;
     let settings = Settings::get(&pool).await;
     pool.close().await;
     settings

@@ -256,6 +256,15 @@ fn zh_cn(value: &str) -> &str {
         "Instance name" => "实例名称",
         "Minecraft version (e.g. 1.21.10)" => "Minecraft 版本（例如 1.21.10）",
         "Search Modrinth…" => "搜索 Modrinth…",
+        "Search Modrinth" => "搜索 Modrinth",
+        "Search CurseForge" => "搜索 CurseForge",
+        "Searching" => "搜索中",
+        "Source" => "来源",
+        "Open on CurseForge" => "在 CurseForge 打开",
+        "View on CurseForge" => "在 CurseForge 查看",
+        "Select a file; installation continues on CurseForge." => {
+            "选择文件后在 CurseForge 继续安装。"
+        }
         "Modrinth user ID(s), comma separated" => {
             "Modrinth 用户 ID（用逗号分隔）"
         }
@@ -966,6 +975,8 @@ mod tests {
     fn selects_the_persisted_locale_and_falls_back() {
         set_locale("zh-CN");
         assert_eq!(t("Home"), "主页");
+        assert_eq!(t("Source"), "来源");
+        assert_eq!(t("Open on CurseForge"), "在 CurseForge 打开");
         assert_eq!(t("Saved skin 3"), "Saved skin 3");
 
         set_locale("en-US");
