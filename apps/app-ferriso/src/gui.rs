@@ -20,7 +20,7 @@ use ferriso_gui::iced::{
 };
 use ferriso_gui::{Message as GuiMessage, Renderer};
 use ferriso_keymap::Keymap;
-use theseus::data::{FeatureFlag, Theme as AppTheme};
+use theseus::data::Theme as AppTheme;
 use theseus::hosting::HostingPowerAction;
 use theseus::instance::{FAVORITES_GROUP_ID, InstanceGroup};
 
@@ -37,7 +37,12 @@ use crate::i18n::{self, t};
 use crate::icons::{IconKind, icon};
 use crate::source::{ProjectRef, ProjectSource};
 
-type Msg = GuiMessage<ViewModel, Message>;
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Local {
+    Accessibility,
+}
+
+type Msg = GuiMessage<ViewModel, Message, Local>;
 
 #[cfg(target_os = "linux")]
 const UI_FONT: iced::Font = iced::Font::with_name("Noto Sans CJK SC");
@@ -643,7 +648,7 @@ impl Default for FerrisoGui {
     }
 }
 
-impl Renderer<ViewModel, Message> for FerrisoGui {
+impl Renderer<ViewModel, Message, Local> for FerrisoGui {
     fn view<'a>(&'a self, view: &'a ViewModel) -> Element<'a, Msg> {
         if let Some(settings) = view.settings.as_ref() {
             i18n::set_locale(&settings.locale);
@@ -661,7 +666,7 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
             .spacing(14)
             .width(Length::Fill)
             .height(Length::Fill);
-        let backdrop = ambient_background(view.phase);
+        let backdrop = ambient_background();
 
         let shell = container(row![sidebar, main].spacing(14))
             .width(Length::Fill)
@@ -767,23 +772,27 @@ impl Renderer<ViewModel, Message> for FerrisoGui {
                 mode == iced::theme::Mode::Light,
             ))
         });
-        let accessibility =
-            time::every(Duration::from_millis(120)).map(|_| Msg::Local(()));
+        let accessibility = time::every(Duration::from_millis(120))
+            .map(|_| Msg::Local(Local::Accessibility));
 
         iced::Subscription::batch([keys, system, accessibility])
     }
 
-    fn update(&mut self, _local: (), _view: &ViewModel) -> iced::Task<Msg> {
-        let messages = crate::accessibility::drain_messages();
+    fn update(&mut self, local: Local, _view: &ViewModel) -> iced::Task<Msg> {
+        match local {
+            Local::Accessibility => {
+                let messages = crate::accessibility::drain_messages();
 
-        if messages.is_empty() {
-            iced::Task::none()
-        } else {
-            iced::Task::batch(
-                messages
-                    .into_iter()
-                    .map(|message| iced::Task::done(Msg::User(message))),
-            )
+                if messages.is_empty() {
+                    iced::Task::none()
+                } else {
+                    iced::Task::batch(
+                        messages.into_iter().map(|message| {
+                            iced::Task::done(Msg::User(message))
+                        }),
+                    )
+                }
+            }
         }
     }
 
@@ -884,7 +893,7 @@ fn sidebar(view: &ViewModel) -> Element<'_, Msg> {
             .width(Length::Fill)
             .padding([10, 12])
             .on_press(Msg::User(Message::Navigate(page)))
-            .style(nav_style(selected, view.phase)),
+            .style(nav_style(selected)),
         );
     }
 
@@ -896,20 +905,14 @@ fn sidebar(view: &ViewModel) -> Element<'_, Msg> {
         .unwrap_or_else(|| "Not signed in".into());
     let avatar_name = active_account.clone();
     let active_jobs = view.jobs.iter().filter(|job| job.active).count();
-    let live_dot = || {
-        icon(
-            IconKind::Dot,
-            8.0,
-            with_alpha(accent_c(), pulse_alpha(view.phase, 120.0)),
-        )
-    };
+    let live_dot = || icon(IconKind::Dot, 8.0, with_alpha(accent_c(), 187));
 
     container(
         column![
             row![
                 container(text(t("F")).size(18).color(ink_c()))
                     .center(Length::Fixed(38.0))
-                    .style(logo_style(view.phase)),
+                    .style(logo_style()),
                 column![
                     text(t("FERRISO")).size(19).color(fg()),
                     text(t("LAUNCHER · GLASS")).size(9).color(accent_c()),
@@ -1367,7 +1370,7 @@ fn home(view: &ViewModel) -> Element<'_, Msg> {
                 .align_y(Alignment::Center),
             )
             .padding(24)
-            .style(hero_style(view.phase)),
+            .style(hero_style()),
         );
     } else {
         body = body.push(
@@ -1396,7 +1399,7 @@ fn home(view: &ViewModel) -> Element<'_, Msg> {
                 .spacing(6),
             )
             .padding(24)
-            .style(hero_style(view.phase)),
+            .style(hero_style()),
         );
     }
 
@@ -1716,7 +1719,7 @@ fn library(view: &ViewModel) -> Element<'_, Msg> {
                 .spacing(6),
             )
             .padding(24)
-            .style(hero_style(view.phase)),
+            .style(hero_style()),
         );
     } else if shown.is_empty() {
         let (title, subtitle) = if query.is_empty() {
@@ -1767,7 +1770,7 @@ fn group_filters(view: &ViewModel) -> Element<'_, Msg> {
         ))
         .padding([5, 9])
         .on_press(Msg::User(Message::FilterGroup(None)))
-        .style(nav_style(view.selected_group.is_none(), view.phase)),
+        .style(nav_style(view.selected_group.is_none())),
     ]
     .spacing(6);
     for group in &view.groups {
@@ -1781,7 +1784,7 @@ fn group_filters(view: &ViewModel) -> Element<'_, Msg> {
             }))
             .padding([5, 9])
             .on_press(Msg::User(Message::FilterGroup(Some(group.id.clone()))))
-            .style(nav_style(selected, view.phase)),
+            .style(nav_style(selected)),
         );
     }
     row![
@@ -2122,7 +2125,7 @@ fn create_custom_stage(view: &ViewModel) -> Element<'_, Msg> {
             ))
             .padding([5, 9])
             .on_press(Msg::User(Message::CreateLoaderChanged(index)))
-            .style(nav_style(view.create.loader == index, view.phase)),
+            .style(nav_style(view.create.loader == index)),
         );
     }
 
@@ -2315,7 +2318,7 @@ fn browse(view: &ViewModel) -> Element<'_, Msg> {
             }))
             .padding([5, 10])
             .on_press(Msg::User(Message::BrowseSourceChanged(source)))
-            .style(nav_style(selected, view.phase)),
+            .style(nav_style(selected)),
         );
     }
 
@@ -2354,7 +2357,7 @@ fn browse(view: &ViewModel) -> Element<'_, Msg> {
             ))
             .padding([5, 9])
             .on_press(Msg::User(Message::BrowseKind(kind)))
-            .style(nav_style(view.browse.kind == kind, view.phase)),
+            .style(nav_style(view.browse.kind == kind)),
         );
     }
     filters = filters
@@ -2696,7 +2699,7 @@ fn project_page(view: &ViewModel) -> Element<'_, Msg> {
                 .on_press(Msg::User(Message::SelectProjectInstance(
                     instance.id.clone(),
                 )))
-                .style(nav_style(selected, view.phase)),
+                .style(nav_style(selected)),
             );
         }
     }
@@ -3282,15 +3285,13 @@ fn instance_page(view: &ViewModel) -> Element<'_, Msg> {
             }))
             .padding([5, 10])
             .on_press(Msg::User(Message::DetailTab(tab)))
-            .style(nav_style(detail.tab == tab, view.phase)),
+            .style(nav_style(detail.tab == tab)),
         );
     }
 
-    let mut body = column![
-        container(header).padding(16).style(hero_style(view.phase)),
-        tabs
-    ]
-    .spacing(12);
+    let mut body =
+        column![container(header).padding(16).style(hero_style()), tabs]
+            .spacing(12);
     if let Some(edit) = &view.edit {
         body = body.push(edit_card(edit, &view.groups));
     }
@@ -3992,7 +3993,7 @@ fn edit_groups<'a>(
             .on_press(Msg::User(Message::ToggleGroupMembership(
                 group.id.clone(),
             )))
-            .style(nav_style(selected, 0.0)),
+            .style(nav_style(selected)),
         );
     }
     column![
@@ -5045,7 +5046,7 @@ fn skins(view: &ViewModel) -> Element<'_, Msg> {
             )
             .padding([5, 9])
             .on_press(Msg::User(Message::SkinTab(tab)))
-            .style(nav_style(selected, 0.0)),
+            .style(nav_style(selected)),
         );
     }
     list = list.push(tabs);
@@ -5326,7 +5327,7 @@ fn theme_buttons(current: AppTheme) -> Vec<Element<'static, Msg>> {
         .on_press(Msg::User(Message::SettingChanged(SettingChange::SetTheme(
             theme,
         ))))
-        .style(nav_style(selected, 0.0))
+        .style(nav_style(selected))
         .into()
     })
     .collect()
@@ -5714,15 +5715,6 @@ fn settings(view: &ViewModel) -> Element<'_, Msg> {
                     SettingChange::ToggleAdvancedRendering
                 ),
                 toggle_row(
-                    "Reduce motion",
-                    settings
-                        .feature_flags
-                        .get(&FeatureFlag::ReduceMotion)
-                        .copied()
-                        .unwrap_or(false),
-                    SettingChange::ToggleReduceMotion
-                ),
-                toggle_row(
                     "Native decorations",
                     settings.native_decorations,
                     SettingChange::ToggleNativeDecorations
@@ -6054,19 +6046,13 @@ fn setting_row(label: &str, value: &str) -> Element<'static, Msg> {
     .into()
 }
 
-fn ambient_background(phase: f32) -> Background {
-    let wave = (phase * 0.5).sin();
-    Linear::new(Radians(-1.15 + wave * 0.55))
+fn ambient_background() -> Background {
+    Linear::new(Radians(-1.15))
         .add_stop(0.0, bg_top())
         .add_stop(0.42, bg_mid())
-        .add_stop(0.78, blend(bg_mid(), accent_c(), 0.06 + wave * 0.02))
+        .add_stop(0.78, blend(bg_mid(), accent_c(), 0.06))
         .add_stop(1.0, bg_bottom())
         .into()
-}
-
-fn pulse_alpha(phase: f32, floor: f32) -> u8 {
-    let wave = (phase * 0.9).sin() * 0.5 + 0.5;
-    (floor + wave * (255.0 - floor)).clamp(0.0, 255.0) as u8
 }
 
 fn glass_panel_style(_theme: &Theme) -> container::Style {
@@ -6138,30 +6124,27 @@ fn card_style(_theme: &Theme) -> container::Style {
     }
 }
 
-fn hero_style(phase: f32) -> impl Fn(&Theme) -> container::Style {
-    move |_theme| {
-        let wave = (phase * 0.5).sin();
-        container::Style {
-            text_color: Some(fg()),
-            background: Some(
-                Linear::new(Radians(-1.0 + wave * 0.35))
-                    .add_stop(0.0, palette().hero_a)
-                    .add_stop(0.45, palette().hero_b)
-                    .add_stop(1.0, palette().hero_c)
-                    .into(),
-            ),
-            border: Border {
-                color: with_alpha(accent_c(), (58.0 + wave * 24.0) as u8),
-                width: 1.0,
-                radius: 22.0.into(),
-            },
-            shadow: Shadow {
-                color: rgba(0, 0, 0, 100),
-                offset: Vector::new(0.0, 16.0),
-                blur_radius: 38.0,
-            },
-            ..Default::default()
-        }
+fn hero_style() -> impl Fn(&Theme) -> container::Style {
+    |_theme| container::Style {
+        text_color: Some(fg()),
+        background: Some(
+            Linear::new(Radians(-1.0))
+                .add_stop(0.0, palette().hero_a)
+                .add_stop(0.45, palette().hero_b)
+                .add_stop(1.0, palette().hero_c)
+                .into(),
+        ),
+        border: Border {
+            color: with_alpha(accent_c(), 58),
+            width: 1.0,
+            radius: 22.0.into(),
+        },
+        shadow: Shadow {
+            color: rgba(0, 0, 0, 100),
+            offset: Vector::new(0.0, 16.0),
+            blur_radius: 38.0,
+        },
+        ..Default::default()
     }
 }
 
@@ -6183,10 +6166,10 @@ fn stat_style(_theme: &Theme) -> container::Style {
     }
 }
 
-fn logo_style(phase: f32) -> impl Fn(&Theme) -> container::Style {
-    move |_theme| container::Style {
+fn logo_style() -> impl Fn(&Theme) -> container::Style {
+    |_theme| container::Style {
         background: Some(
-            Linear::new(Radians(-0.8 + (phase * 0.4).sin() * 0.2))
+            Linear::new(Radians(-0.8))
                 .add_stop(0.0, accent_c())
                 .add_stop(1.0, accent_cyan_c())
                 .into(),
@@ -6196,7 +6179,7 @@ fn logo_style(phase: f32) -> impl Fn(&Theme) -> container::Style {
             ..Default::default()
         },
         shadow: Shadow {
-            color: with_alpha(accent_c(), pulse_alpha(phase, 40.0) / 2),
+            color: with_alpha(accent_c(), 73),
             offset: Vector::new(0.0, 4.0),
             blur_radius: 22.0,
         },
@@ -6246,14 +6229,15 @@ fn accent_chip_style(_theme: &Theme) -> container::Style {
     }
 }
 
+/// Midpoint of the old gentle pulse; ambient animation is intentionally off.
+const NAV_GLOW_ALPHA: u8 = 212;
+
 fn nav_style(
     selected: bool,
-    phase: f32,
 ) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
         let hovered =
             matches!(status, button::Status::Hovered | button::Status::Pressed);
-        let glow = pulse_alpha(phase, 170.0);
         button::Style {
             background: Some(if selected {
                 Linear::new(Radians(-1.4))
@@ -6268,7 +6252,7 @@ fn nav_style(
             text_color: if selected { fg() } else { muted_c() },
             border: Border {
                 color: if selected {
-                    with_alpha(accent_c(), glow / 4)
+                    with_alpha(accent_c(), NAV_GLOW_ALPHA / 4)
                 } else {
                     Color::TRANSPARENT
                 },
@@ -6277,7 +6261,7 @@ fn nav_style(
             },
             shadow: if selected {
                 Shadow {
-                    color: with_alpha(accent_c(), glow / 8),
+                    color: with_alpha(accent_c(), NAV_GLOW_ALPHA / 8),
                     offset: Vector::new(0.0, 4.0),
                     blur_radius: 16.0,
                 }

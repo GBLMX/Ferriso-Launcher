@@ -30,10 +30,10 @@ use serde_json::Value;
 use theseus::{
     State, cache,
     data::{
-        ContentType, Credentials, EditInstance, FeatureFlag,
-        InstanceLaunchOverridesPatch, InstanceLink, InstanceMetadata,
-        MemorySettings, ModLoader, OnboardingChecklist, ProcessMetadata,
-        ResolutionPreferences, Settings, Theme,
+        ContentType, Credentials, EditInstance, InstanceLaunchOverridesPatch,
+        InstanceLink, InstanceMetadata, MemorySettings, ModLoader,
+        OnboardingChecklist, ProcessMetadata, ResolutionPreferences, Settings,
+        Theme,
     },
     friends,
     hosting::{self, HostingPowerAction},
@@ -50,7 +50,6 @@ use uuid::Uuid;
 
 // Stable subscription identities. Frontends never own these clocks; the actor
 // reconciles them from the current view state.
-const SUB_ANIMATION: u64 = 1;
 const SUB_JOBS: u64 = 2;
 const SUB_PROCESSES: u64 = 3;
 const SUB_UPDATES: u64 = 4;
@@ -1068,7 +1067,6 @@ pub enum SettingChange {
     ToggleForceFullscreen,
     ToggleHideOnProcessStart,
     ToggleSidebar,
-    ToggleReduceMotion,
 }
 
 #[derive(Clone, Debug)]
@@ -1135,7 +1133,6 @@ pub struct ViewModel {
     pub update: Option<UpdateInfo>,
     pub version: &'static str,
     pub latest_release: Option<String>,
-    pub phase: f32,
     pub processes: Vec<ProcessView>,
     pub exit: Option<ProcessExitView>,
     pub hosting: HostingView,
@@ -1431,7 +1428,6 @@ pub enum Message {
     UpdateChecked(Result<Option<UpdateInfo>, String>),
     DismissUpdate,
     ClearLiveLog,
-    AnimationTick,
 }
 
 pub struct FerrisoApp {
@@ -1473,7 +1469,6 @@ pub struct FerrisoApp {
     skin_dragging: bool,
     skin_drag_last: Option<(f32, f32)>,
     latest_release: Option<String>,
-    phase: f32,
     processes: Vec<ProcessView>,
     exit: Option<ProcessExitView>,
     hosting: HostingView,
@@ -1552,7 +1547,6 @@ impl FerrisoApp {
             skin_dragging: false,
             skin_drag_last: None,
             latest_release: None,
-            phase: 0.0,
             processes: Vec::new(),
             exit: None,
             hosting: HostingView::default(),
@@ -1692,7 +1686,6 @@ impl FerrisoApp {
             update: self.update.clone(),
             version: VERSION,
             latest_release: self.latest_release.clone(),
-            phase: self.phase,
             processes: self.processes.clone(),
             exit: self.exit.clone(),
             hosting: self.hosting.clone(),
@@ -4680,9 +4673,6 @@ impl App for FerrisoApp {
                 let Some(next) = apply_setting(settings, change) else {
                     return Command::none();
                 };
-                if reduce_motion(&next) {
-                    self.phase = 0.0;
-                }
                 self.settings = Some(next.clone());
                 Command::perform(save_settings(next), Message::SettingsSaved)
             }
@@ -4755,16 +4745,6 @@ impl App for FerrisoApp {
                     self.reload_detail(),
                 ])
             }
-            Message::AnimationTick => {
-                if self
-                    .settings
-                    .as_ref()
-                    .is_none_or(|settings| !reduce_motion(settings))
-                {
-                    self.phase = (self.phase + 0.07) % std::f32::consts::TAU;
-                }
-                Command::none()
-            }
         }
     }
 
@@ -4774,17 +4754,6 @@ impl App for FerrisoApp {
         }
 
         let mut subscriptions = Vec::new();
-        if self
-            .settings
-            .as_ref()
-            .is_none_or(|settings| !reduce_motion(settings))
-        {
-            subscriptions.push(Subscription::interval(
-                SUB_ANIMATION,
-                Duration::from_millis(90),
-                Message::AnimationTick,
-            ));
-        }
         subscriptions.push(Subscription::interval(
             SUB_JOBS,
             Duration::from_secs(1),
@@ -5271,6 +5240,63 @@ async fn load_project(
     }
 }
 
+async fn instance_compatibility(
+    instance_id: Option<&str>,
+) -> Option<(String, String)> {
+    let instance_id = instance_id?;
+    instance::get(instance_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|metadata| {
+            (
+                metadata.applied_content_set.game_version,
+                metadata.applied_content_set.loader.as_str().to_string(),
+            )
+        })
+}
+
+fn select_compatible_version(
+    choices: &[VersionChoice],
+    kind: ProjectKind,
+    compatibility: Option<&(String, String)>,
+) -> Option<usize> {
+    compatibility
+        .and_then(|(game, loader)| {
+            choices.iter().position(|version| {
+                version.game_versions.iter().any(|value| value == game)
+                    && (kind != ProjectKind::Mod
+                        || version.loaders.iter().any(|value| value == loader))
+            })
+        })
+        .or_else(|| (!choices.is_empty()).then_some(0))
+}
+
+fn curseforge_version_choices(
+    files: Vec<curseforge::File>,
+) -> Vec<VersionChoice> {
+    files
+        .into_iter()
+        .take(40)
+        .map(|file| VersionChoice {
+            id: file.id.to_string(),
+            number: file.display_name,
+            game_versions: file
+                .game_versions
+                .iter()
+                .filter(|value| looks_like_minecraft_version(value))
+                .cloned()
+                .collect(),
+            loaders: file
+                .game_versions
+                .iter()
+                .filter_map(|value| curseforge_loader(value))
+                .collect(),
+            downloads: file.downloads.min(u32::MAX as u64) as u32,
+        })
+        .collect()
+}
+
 async fn load_modrinth_project(
     id: String,
     selected_instance: Option<String>,
@@ -5327,7 +5353,7 @@ async fn load_modrinth_project(
                 .unwrap_or_else(|| "Modrinth".into())
         });
 
-    let mut choices: Vec<VersionChoice> = versions
+    let choices: Vec<VersionChoice> = versions
         .into_iter()
         .take(40)
         .map(|version| VersionChoice {
@@ -5338,32 +5364,10 @@ async fn load_modrinth_project(
             downloads: version.downloads,
         })
         .collect();
-
-    let compatibility = if let Some(instance_id) = selected_instance.as_deref()
-    {
-        instance::get(instance_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|metadata| {
-                (
-                    metadata.applied_content_set.game_version,
-                    metadata.applied_content_set.loader.as_str().to_string(),
-                )
-            })
-    } else {
-        None
-    };
-    let selected_version = compatibility
-        .as_ref()
-        .and_then(|(game, loader)| {
-            choices.iter().position(|version| {
-                version.game_versions.iter().any(|value| value == game)
-                    && (kind != ProjectKind::Mod
-                        || version.loaders.iter().any(|value| value == loader))
-            })
-        })
-        .or_else(|| (!choices.is_empty()).then_some(0));
+    let compatibility =
+        instance_compatibility(selected_instance.as_deref()).await;
+    let selected_version =
+        select_compatible_version(&choices, kind, compatibility.as_ref());
 
     let view = ProjectView {
         source: ProjectSource::Modrinth,
@@ -5387,7 +5391,7 @@ async fn load_modrinth_project(
         project: Some(view),
         body: project.body,
         gallery,
-        versions: std::mem::take(&mut choices),
+        versions: choices,
         selected_version,
         selected_instance,
         installing: false,
@@ -5440,51 +5444,11 @@ async fn load_curseforge_project(
     )
     .await;
 
-    let mut choices: Vec<VersionChoice> = files
-        .into_iter()
-        .take(40)
-        .map(|file| VersionChoice {
-            id: file.id.to_string(),
-            number: file.display_name,
-            game_versions: file
-                .game_versions
-                .iter()
-                .filter(|value| looks_like_minecraft_version(value))
-                .cloned()
-                .collect(),
-            loaders: file
-                .game_versions
-                .iter()
-                .filter_map(|value| curseforge_loader(value))
-                .collect(),
-            downloads: file.downloads.min(u32::MAX as u64) as u32,
-        })
-        .collect();
-    let compatibility = if let Some(instance_id) = selected_instance.as_deref()
-    {
-        instance::get(instance_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|metadata| {
-                (
-                    metadata.applied_content_set.game_version,
-                    metadata.applied_content_set.loader.as_str().to_string(),
-                )
-            })
-    } else {
-        None
-    };
-    let selected_version = compatibility
-        .as_ref()
-        .and_then(|(game, loader)| {
-            choices.iter().position(|version| {
-                version.game_versions.iter().any(|value| value == game)
-                    && (kind != ProjectKind::Mod
-                        || version.loaders.iter().any(|value| value == loader))
-            })
-        })
-        .or_else(|| (!choices.is_empty()).then_some(0));
+    let choices = curseforge_version_choices(files);
+    let compatibility =
+        instance_compatibility(selected_instance.as_deref()).await;
+    let selected_version =
+        select_compatible_version(&choices, kind, compatibility.as_ref());
 
     let view = ProjectView {
         source: ProjectSource::CurseForge,
@@ -5512,7 +5476,7 @@ async fn load_curseforge_project(
         project: Some(view),
         body: html_to_text(&description),
         gallery,
-        versions: std::mem::take(&mut choices),
+        versions: choices,
         selected_version,
         selected_instance,
         installing: false,
@@ -7331,23 +7295,9 @@ fn apply_setting(
         SettingChange::ToggleSidebar => {
             settings.toggle_sidebar = !settings.toggle_sidebar
         }
-        SettingChange::ToggleReduceMotion => {
-            let enabled = !reduce_motion(&settings);
-            settings
-                .feature_flags
-                .insert(FeatureFlag::ReduceMotion, enabled);
-        }
     }
 
     Some(settings)
-}
-
-fn reduce_motion(settings: &Settings) -> bool {
-    settings
-        .feature_flags
-        .get(&FeatureFlag::ReduceMotion)
-        .copied()
-        .unwrap_or(false)
 }
 
 impl From<InstanceMetadata> for InstanceView {

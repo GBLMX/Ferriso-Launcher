@@ -24,7 +24,7 @@ const DETAIL: u64 = 6;
 const NAV_BASE: u64 = 100;
 const SETTING_BASE: u64 = 200;
 
-const SETTING_COUNT: usize = 8;
+const SETTING_COUNT: usize = 7;
 
 pub fn publish(view: &ViewModel) {
     ferriso_access::set_tree(tree(view));
@@ -154,14 +154,6 @@ fn setting_states(
         ("Native decorations", settings.native_decorations),
         ("Force fullscreen", settings.force_fullscreen),
         ("Hide on game start", settings.hide_on_process_start),
-        (
-            "Reduce motion",
-            settings
-                .feature_flags
-                .get(&theseus::data::FeatureFlag::ReduceMotion)
-                .copied()
-                .unwrap_or(false),
-        ),
         ("Toggle sidebar", settings.toggle_sidebar),
     ]
 }
@@ -174,8 +166,7 @@ fn setting_change(index: usize) -> Option<SettingChange> {
         3 => Some(SettingChange::ToggleNativeDecorations),
         4 => Some(SettingChange::ToggleForceFullscreen),
         5 => Some(SettingChange::ToggleHideOnProcessStart),
-        6 => Some(SettingChange::ToggleReduceMotion),
-        7 => Some(SettingChange::ToggleSidebar),
+        6 => Some(SettingChange::ToggleSidebar),
         _ => None,
     }
 }
