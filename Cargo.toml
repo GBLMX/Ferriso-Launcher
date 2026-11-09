@@ -215,11 +215,11 @@ tauri-plugin-updater = { git = "https://github.com/modrinth/plugins-workspace", 
 tauri-plugin-window-state = "2.4.0"
 tempfile = "3.23.0"
 ferriso-access = { path = "packages/ferriso-access" }
-ferriso-config = { git = "https://github.com/GBLMX/Ferriso", rev = "b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9" }
-ferriso-core = { git = "https://github.com/GBLMX/Ferriso", rev = "b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9" }
-ferriso-diagnostics = { git = "https://github.com/GBLMX/Ferriso", rev = "b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9" }
-ferriso-gui = { git = "https://github.com/GBLMX/Ferriso", rev = "b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9" }
-ferriso-keymap = { git = "https://github.com/GBLMX/Ferriso", rev = "b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9" }
+ferriso-config = { git = "https://github.com/GBLMX/Ferriso", rev = "802abee7f8efa6e9e3d2afbcd36ef22e4956e837" }
+ferriso-core = { git = "https://github.com/GBLMX/Ferriso", rev = "802abee7f8efa6e9e3d2afbcd36ef22e4956e837" }
+ferriso-diagnostics = { git = "https://github.com/GBLMX/Ferriso", rev = "802abee7f8efa6e9e3d2afbcd36ef22e4956e837" }
+ferriso-gui = { git = "https://github.com/GBLMX/Ferriso", rev = "802abee7f8efa6e9e3d2afbcd36ef22e4956e837" }
+ferriso-keymap = { git = "https://github.com/GBLMX/Ferriso", rev = "802abee7f8efa6e9e3d2afbcd36ef22e4956e837" }
 theseus = { path = "packages/app-lib" }
 webbrowser = "1.0"
 thiserror = "2.0.17"

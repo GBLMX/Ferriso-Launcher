@@ -16,6 +16,26 @@ The native frontend is built with iced; launcher state and installs are owned
 by `theseus` in `packages/app-lib`. The data directory keeps the upstream
 `ModrinthApp` identifier so existing instances and accounts remain available.
 
+The native frontend currently builds against Ferriso `0.3.1` pinned at
+`802abee7f8efa6e9e3d2afbcd36ef22e4956e837`; `ferriso-core` supplies the actor
+runtime contract while the launcher actor lives in `apps/app-ferriso/src/app.rs`.
+
+## CurseForge
+
+CurseForge search and project pages require an official API key in the local
+native config:
+
+```toml
+[curseforge]
+api_key = "…"
+```
+
+The same value can be provided through
+`FERRISO_LAUNCHER__CURSEFORGE__API_KEY`. Downloadable resource packs and shaders
+can be installed directly into an instance. Mods and modpacks still open the
+official CurseForge page because their dependency and redistribution rules are
+not yet implemented; the launcher never bypasses a disabled CurseForge download.
+
 ## Build
 
 ```sh
@@ -23,6 +43,9 @@ cargo run -p ferriso-launcher
 cargo test -p ferriso-launcher
 cargo clippy -p ferriso-launcher --all-targets -- -D warnings
 ```
+
+`packages/app-lib` builds a Gradle Java agent and expects JDK 17. Newer JDKs
+can fail its palantir-java-format check even when the Rust code is valid.
 
 Window and layered configuration live in `$FERRISO_LAUNCHER_CONFIG` or the
 platform config directory (`config.toml`).

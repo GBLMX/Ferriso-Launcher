@@ -30,7 +30,7 @@ use crate::app::{
     JobView, JreChoice, LibraryForm, LibrarySort, LogView, Message, Page,
     ProcessExitView, ProcessView, ProjectKind, ProjectView, SettingChange,
     SkinTab, VersionPicker, ViewModel, WorldArt, WorldForm, WorldFormKind,
-    WorldRow,
+    WorldRow, can_install_curseforge_direct,
 };
 use crate::curseforge;
 use crate::i18n::{self, t};
@@ -2751,8 +2751,16 @@ fn project_page(view: &ViewModel) -> Element<'_, Msg> {
         );
     }
 
+    let curseforge_direct = project.source == ProjectSource::CurseForge
+        && page.selected_version().is_some_and(|version| {
+            can_install_curseforge_direct(project, version)
+        });
     let install_label = if page.installing {
         t("Installing…")
+    } else if curseforge_direct && page.selected_instance.is_none() {
+        t("Select instance first")
+    } else if curseforge_direct {
+        t("Install")
     } else if project.source == ProjectSource::CurseForge {
         t("Open on CurseForge")
     } else if project.kind == ProjectKind::Modpack {
@@ -2760,11 +2768,16 @@ fn project_page(view: &ViewModel) -> Element<'_, Msg> {
     } else {
         t("Add to instance")
     };
-    let can_install = !page.installing
-        && page.selected_version.is_some()
-        && (project.source == ProjectSource::CurseForge
-            || project.kind == ProjectKind::Modpack
-            || page.selected_instance.is_some());
+    let can_install = if project.source == ProjectSource::CurseForge {
+        !page.installing
+            && page.selected_version.is_some()
+            && (!curseforge_direct || page.selected_instance.is_some())
+    } else {
+        !page.installing
+            && page.selected_version.is_some()
+            && (project.kind == ProjectKind::Modpack
+                || page.selected_instance.is_some())
+    };
     let install_button: Element<'_, Msg> = if can_install {
         button(text(install_label).size(11).color(ink_c()))
             .padding([8, 13])
@@ -2780,7 +2793,9 @@ fn project_page(view: &ViewModel) -> Element<'_, Msg> {
 
     let mut right = column![
         text(t("Install")).size(15).color(fg()),
-        text(t(if project.source == ProjectSource::CurseForge {
+        text(t(if curseforge_direct {
+            "Select a version and an instance."
+        } else if project.source == ProjectSource::CurseForge {
             "Select a file; installation continues on CurseForge."
         } else {
             "Select a version and an instance."

@@ -32,8 +32,8 @@ use theseus::{
     data::{
         ContentType, Credentials, EditInstance, InstanceLaunchOverridesPatch,
         InstanceLink, InstanceMetadata, MemorySettings, ModLoader,
-        OnboardingChecklist, ProcessMetadata, ResolutionPreferences, Settings,
-        Theme,
+        OnboardingChecklist, ProcessMetadata, ProjectType,
+        ResolutionPreferences, Settings, Theme,
     },
     friends,
     hosting::{self, HostingPowerAction},
@@ -654,6 +654,8 @@ pub struct VersionChoice {
     pub game_versions: Vec<String>,
     pub loaders: Vec<String>,
     pub downloads: u32,
+    pub download_url: Option<String>,
+    pub file_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2410,6 +2412,22 @@ impl App for FerrisoApp {
                     return Command::none();
                 };
                 if project.source == ProjectSource::CurseForge {
+                    if can_install_curseforge_direct(&project, &version) {
+                        let Some(target) = page.selected_instance.clone()
+                        else {
+                            page.install_error =
+                                Some("Select an instance first".into());
+                            return Command::none();
+                        };
+                        page.installing = true;
+                        page.install_error = None;
+                        page.install_result = None;
+                        self.status = format!("Installing {}…", project.title);
+                        return Command::perform(
+                            install_curseforge_file(project, version, target),
+                            Message::ProjectVersionInstalled,
+                        );
+                    }
                     match open_curseforge_page(&project, Some(&version.id)) {
                         Ok(message) => {
                             page.install_result = Some(message.clone());
@@ -5293,8 +5311,24 @@ fn curseforge_version_choices(
                 .filter_map(|value| curseforge_loader(value))
                 .collect(),
             downloads: file.downloads.min(u32::MAX as u64) as u32,
+            download_url: file.download_url,
+            file_name: (!file.file_name.is_empty()).then_some(file.file_name),
         })
         .collect()
+}
+
+pub(crate) fn can_install_curseforge_direct(
+    project: &ProjectView,
+    version: &VersionChoice,
+) -> bool {
+    matches!(
+        project.kind,
+        ProjectKind::ResourcePack | ProjectKind::Shader
+    ) && version.download_url.is_some()
+        && version
+            .file_name
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty())
 }
 
 async fn load_modrinth_project(
@@ -5362,6 +5396,8 @@ async fn load_modrinth_project(
             game_versions: version.game_versions,
             loaders: version.loaders,
             downloads: version.downloads,
+            download_url: None,
+            file_name: None,
         })
         .collect();
     let compatibility =
@@ -5487,10 +5523,11 @@ async fn load_curseforge_project(
 
 fn looks_like_minecraft_version(value: &str) -> bool {
     let mut parts = value.split('.');
-    parts.next().is_some_and(|part| !part.is_empty())
-        && parts.all(|part| {
-            !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())
-        })
+    parts.next().is_some_and(|part| {
+        !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())
+    }) && parts.all(|part| {
+        !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())
+    })
 }
 
 fn curseforge_loader(value: &str) -> Option<String> {
@@ -5681,6 +5718,83 @@ fn open_curseforge_page(
     webbrowser::open(&url)
         .map_err(|error| format!("Could not open CurseForge: {error}"))?;
     Ok(format!("Opened CurseForge: {url}"))
+}
+
+const MAX_CURSEFORGE_FILE_BYTES: u64 = 512 * 1024 * 1024;
+
+async fn install_curseforge_file(
+    project: ProjectView,
+    version: VersionChoice,
+    instance_id: String,
+) -> Result<String, String> {
+    let url = version.download_url.as_deref().ok_or_else(|| {
+        "This CurseForge file has no download URL".to_string()
+    })?;
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("CurseForge returned an unsupported download URL".into());
+    }
+    let file_name = version
+        .file_name
+        .as_deref()
+        .and_then(|name| Path::new(name).file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .ok_or_else(|| {
+            "CurseForge returned an invalid file name".to_string()
+        })?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|error| {
+            format!("Could not create download client: {error}")
+        })?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("CurseForge download failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "CurseForge download returned HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_CURSEFORGE_FILE_BYTES)
+    {
+        return Err("CurseForge file exceeds the download limit".into());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("CurseForge download failed: {error}"))?;
+    if bytes.len() as u64 > MAX_CURSEFORGE_FILE_BYTES {
+        return Err("CurseForge file exceeds the download limit".into());
+    }
+
+    let project_type = match project.kind {
+        ProjectKind::ResourcePack => ProjectType::ResourcePack,
+        ProjectKind::Shader => ProjectType::ShaderPack,
+        _ => {
+            return Err(
+                "Direct CurseForge installation is limited to resource packs and shaders"
+                    .into(),
+            );
+        }
+    };
+    let temp = tempfile::tempdir().map_err(|error| {
+        format!("Could not create download directory: {error}")
+    })?;
+    let path = temp.path().join(file_name);
+    tokio::fs::write(&path, &bytes)
+        .await
+        .map_err(|error| format!("Could not write CurseForge file: {error}"))?;
+    instance::add_project_from_path(&instance_id, &path, Some(project_type))
+        .await
+        .map_err(describe)?;
+    Ok(format!("Installed {}", project.title))
 }
 
 async fn install_project_version(
@@ -6862,6 +6976,8 @@ async fn load_versions(
             game_versions: version.game_versions,
             loaders: version.loaders,
             downloads: version.downloads,
+            download_url: None,
+            file_name: None,
         })
         .collect())
 }
@@ -7401,12 +7517,15 @@ mod tests {
 
     use super::{
         BrowseRequest, BrowseSort, CrashCause, FerrisoApp, InstanceView,
-        Message, ProjectKind, ProjectView, analyze_log_lines,
-        auth_code_from_path, compose_avatar, create_folder_in,
-        decode_data_icon, delete_entry, extract_invite_id, extract_login_code,
+        Message, ProjectKind, ProjectView, VersionChoice, analyze_log_lines,
+        auth_code_from_path, can_install_curseforge_direct, compose_avatar,
+        create_folder_in, curseforge_version_choices, decode_data_icon,
+        delete_entry, extract_invite_id, extract_login_code,
         process_exit_succeeded, relative_file_path, rename_entry,
         render_avatar_png, validate_entry_name,
     };
+
+    use crate::curseforge;
     use ferriso_core::App as _;
     use image::{Rgba, RgbaImage};
 
@@ -7741,5 +7860,68 @@ mod tests {
         let rendered = render_avatar_png(&bytes, None, false).expect("png");
         let decoded = image::load_from_memory(&rendered).unwrap().to_rgba8();
         assert_eq!(decoded.dimensions(), (16, 32));
+    }
+
+    #[test]
+    fn curseforge_direct_install_is_limited_to_dependency_free_content() {
+        let version = VersionChoice {
+            id: "99".into(),
+            number: "1.0".into(),
+            game_versions: vec!["1.21.1".into()],
+            loaders: Vec::new(),
+            downloads: 1,
+            download_url: Some("https://example.invalid/pack.zip".into()),
+            file_name: Some("pack.zip".into()),
+        };
+        let project = |kind| ProjectView {
+            source: ProjectSource::CurseForge,
+            id: "42".into(),
+            slug: "example".into(),
+            title: "Example".into(),
+            summary: String::new(),
+            kind,
+            icon_url: None,
+            icon: None,
+            downloads: 1,
+            author: "Author".into(),
+            version_id: None,
+        };
+
+        assert!(can_install_curseforge_direct(
+            &project(ProjectKind::ResourcePack),
+            &version
+        ));
+        assert!(can_install_curseforge_direct(
+            &project(ProjectKind::Shader),
+            &version
+        ));
+        assert!(!can_install_curseforge_direct(
+            &project(ProjectKind::Mod),
+            &version
+        ));
+    }
+
+    #[test]
+    fn curseforge_version_choices_carry_direct_downloads() {
+        let choices = curseforge_version_choices(vec![curseforge::File {
+            id: 99,
+            display_name: "Pack 1.0".into(),
+            file_name: "pack.zip".into(),
+            download_url: Some("https://example.invalid/pack.zip".into()),
+            downloads: 3,
+            game_versions: vec!["1.21.1".into()],
+        }]);
+        assert_eq!(choices[0].file_name.as_deref(), Some("pack.zip"));
+        assert_eq!(
+            choices[0].download_url.as_deref(),
+            Some("https://example.invalid/pack.zip")
+        );
+    }
+
+    #[test]
+    fn minecraft_version_heuristic_rejects_loader_names() {
+        assert!(super::looks_like_minecraft_version("1.21.1"));
+        assert!(!super::looks_like_minecraft_version("Forge"));
+        assert!(!super::looks_like_minecraft_version("Fabric"));
     }
 }

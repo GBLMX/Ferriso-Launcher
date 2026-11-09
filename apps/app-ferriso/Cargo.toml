@@ -41,6 +41,7 @@ reqwest = { workspace = true, features = ["gzip", "http2", "rustls-tls-webpki-ro
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 semver = "1.0.27"
+tempfile = { workspace = true }
 theseus = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "net", "rt", "sync", "time"] }
 urlencoding = { workspace = true }
@@ -50,6 +51,3 @@ webbrowser = { workspace = true }
 [[bin]]
 name = "ferriso-launcher"
 path = "src/main.rs"
-
-[dev-dependencies]
-tempfile = { workspace = true }

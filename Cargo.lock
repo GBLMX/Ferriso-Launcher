@@ -4069,8 +4069,8 @@ dependencies = [
 
 [[package]]
 name = "ferriso-config"
-version = "0.2.0"
-source = "git+https://github.com/GBLMX/Ferriso?rev=b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9#b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9"
+version = "0.3.1"
+source = "git+https://github.com/GBLMX/Ferriso?rev=802abee7f8efa6e9e3d2afbcd36ef22e4956e837#802abee7f8efa6e9e3d2afbcd36ef22e4956e837"
 dependencies = [
  "config",
  "miette",
@@ -4080,8 +4080,8 @@ dependencies = [
 
 [[package]]
 name = "ferriso-core"
-version = "0.2.0"
-source = "git+https://github.com/GBLMX/Ferriso?rev=b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9#b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9"
+version = "0.3.1"
+source = "git+https://github.com/GBLMX/Ferriso?rev=802abee7f8efa6e9e3d2afbcd36ef22e4956e837#802abee7f8efa6e9e3d2afbcd36ef22e4956e837"
 dependencies = [
  "ferriso-diagnostics",
  "futures",
@@ -4090,8 +4090,8 @@ dependencies = [
 
 [[package]]
 name = "ferriso-diagnostics"
-version = "0.2.0"
-source = "git+https://github.com/GBLMX/Ferriso?rev=b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9#b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9"
+version = "0.3.1"
+source = "git+https://github.com/GBLMX/Ferriso?rev=802abee7f8efa6e9e3d2afbcd36ef22e4956e837#802abee7f8efa6e9e3d2afbcd36ef22e4956e837"
 dependencies = [
  "miette",
  "thiserror 2.0.17",
@@ -4099,8 +4099,8 @@ dependencies = [
 
 [[package]]
 name = "ferriso-gui"
-version = "0.2.0"
-source = "git+https://github.com/GBLMX/Ferriso?rev=b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9#b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9"
+version = "0.3.1"
+source = "git+https://github.com/GBLMX/Ferriso?rev=802abee7f8efa6e9e3d2afbcd36ef22e4956e837#802abee7f8efa6e9e3d2afbcd36ef22e4956e837"
 dependencies = [
  "bytemuck",
  "ferriso-core",
@@ -4114,8 +4114,8 @@ dependencies = [
 
 [[package]]
 name = "ferriso-keymap"
-version = "0.2.0"
-source = "git+https://github.com/GBLMX/Ferriso?rev=b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9#b73a1cbbaf2e3c8c5abeff75d6a74c125113d1f9"
+version = "0.3.1"
+source = "git+https://github.com/GBLMX/Ferriso?rev=802abee7f8efa6e9e3d2afbcd36ef22e4956e837#802abee7f8efa6e9e3d2afbcd36ef22e4956e837"
 
 [[package]]
 name = "ferriso-launcher"

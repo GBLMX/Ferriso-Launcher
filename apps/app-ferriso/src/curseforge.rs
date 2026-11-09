@@ -68,6 +68,10 @@ pub struct File {
     pub id: u32,
     #[serde(rename = "displayName", default)]
     pub display_name: String,
+    #[serde(rename = "fileName", default)]
+    pub file_name: String,
+    #[serde(rename = "downloadUrl", default)]
+    pub download_url: Option<String>,
     #[serde(rename = "downloadCount", default)]
     pub downloads: u64,
     #[serde(rename = "gameVersions", default)]
@@ -259,10 +263,15 @@ mod tests {
         assert_eq!(project.screenshots[0].title.as_deref(), Some("Shot"));
 
         let file: File = serde_json::from_str(
-            r#"{"id":99,"displayName":"Example 1.0","downloadCount":3,"gameVersions":["1.21.1","Fabric"]}"#,
+            r#"{"id":99,"displayName":"Example 1.0","fileName":"example.zip","downloadUrl":"https://example.invalid/example.zip","downloadCount":3,"gameVersions":["1.21.1","Fabric"]}"#,
         )
         .unwrap();
         assert_eq!(file.id, 99);
+        assert_eq!(file.file_name, "example.zip");
+        assert_eq!(
+            file.download_url.as_deref(),
+            Some("https://example.invalid/example.zip")
+        );
         assert_eq!(file.game_versions, ["1.21.1", "Fabric"]);
     }
 
